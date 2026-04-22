@@ -4,11 +4,12 @@ import { useAuth } from '@clerk/nextjs';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { useMemo } from 'react';
 import { clerkJwtTemplateForSupabase } from '@/lib/supabase/clerkJwtTemplate';
+import { getSupabasePublicKey } from '@/lib/supabase/publicKey';
 
 export function useSupabaseBrowser(): SupabaseClient {
   const { getToken } = useAuth();
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const anon = getSupabasePublicKey();
 
   return useMemo(
     () =>

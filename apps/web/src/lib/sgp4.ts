@@ -51,3 +51,20 @@ export function elevationDegForObserver(
     return null;
   }
 }
+
+export function buildOrbitTrack(
+  row: TleRow,
+  start: Date,
+  minutesForward = 90,
+  stepSeconds = 120
+): { lat: number; lon: number; altKm: number }[] {
+  const samples: { lat: number; lon: number; altKm: number }[] = [];
+  const totalSeconds = minutesForward * 60;
+
+  for (let offset = 0; offset <= totalSeconds; offset += stepSeconds) {
+    const sample = propagatePositionDeg(row, new Date(start.getTime() + offset * 1000));
+    if (sample) samples.push(sample);
+  }
+
+  return samples;
+}

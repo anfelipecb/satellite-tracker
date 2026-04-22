@@ -15,8 +15,10 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+
   return (
-    <ClerkProvider>
+    <ClerkProvider publishableKey={clerkPublishableKey}>
       <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
         <body className="min-h-screen font-sans">
           <AppProviders>{children}</AppProviders>

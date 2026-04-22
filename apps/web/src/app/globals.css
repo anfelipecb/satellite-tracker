@@ -8,4 +8,13 @@
 
 body {
   @apply bg-void text-slate-100 antialiased;
+  background-image:
+    radial-gradient(circle at top, rgba(34, 211, 238, 0.12), transparent 24%),
+    radial-gradient(circle at 80% 20%, rgba(251, 113, 133, 0.14), transparent 18%);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: rgba(34, 211, 238, 0.3);
+  color: white;
 }
