@@ -1,0 +1,39 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build
+.next
+out
+dist
+.turbo
+*.tsbuildinfo
+
+# Env
+.env
+.env.local
+.env.*.local
+apps/*/.env
+apps/*/.env.local
+
+# IDE
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Supabase
+supabase/.branches
+supabase/.temp
+
+# Cesium
+apps/web/public/cesium
+
+# Test
+coverage

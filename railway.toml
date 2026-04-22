@@ -1,0 +1,6 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "corepack enable && corepack prepare pnpm@9.15.0 --activate && pnpm install && pnpm --filter @satellite-tracker/shared build && pnpm --filter worker build"
+
+[deploy]
+startCommand = "node apps/worker/dist/index.js"

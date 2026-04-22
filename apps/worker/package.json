@@ -1,0 +1,26 @@
+{
+  "name": "worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "lint": "echo \"lint skipped for worker\"",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@satellite-tracker/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.47.10",
+    "croner": "^9.0.0",
+    "satellite.js": "^5.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.2",
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.8"
+  }
+}

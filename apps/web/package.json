@@ -1,0 +1,39 @@
+{
+  "name": "web",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "next lint",
+    "test": "echo \"no web tests yet\""
+  },
+  "dependencies": {
+    "@clerk/nextjs": "^6.9.14",
+    "@satellite-tracker/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.47.10",
+    "@tanstack/react-query": "^5.62.8",
+    "cesium": "^1.122.0",
+    "lucide-react": "^0.469.0",
+    "next": "15.2.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^2.15.0",
+    "resium": "^1.18.2",
+    "satellite.js": "^5.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "autoprefixer": "^10.4.20",
+    "copy-webpack-plugin": "^12.0.2",
+    "eslint": "^9.17.0",
+    "eslint-config-next": "15.2.3",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2"
+  }
+}

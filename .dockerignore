@@ -1,0 +1,9 @@
+node_modules
+.next
+.turbo
+dist
+.git
+**/.env
+**/.env.*
+*.log
+apps/web/public/cesium
