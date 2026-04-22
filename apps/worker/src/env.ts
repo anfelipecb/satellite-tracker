@@ -3,7 +3,11 @@ import { z } from 'zod';
 const envSchema = z.object({
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(20),
-  N2YO_API_KEY: z.string().min(1),
+  /** N2YO jobs; empty string falls back so the process can boot without a key (replace for real N2YO calls). */
+  N2YO_API_KEY: z
+    .string()
+    .optional()
+    .transform((v) => (v && v.trim().length > 0 ? v.trim() : 'n2yo-replace-me')),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

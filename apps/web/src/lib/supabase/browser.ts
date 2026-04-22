@@ -3,6 +3,7 @@
 import { useAuth } from '@clerk/nextjs';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { useMemo } from 'react';
+import { clerkJwtTemplateForSupabase } from '@/lib/supabase/clerkJwtTemplate';
 
 export function useSupabaseBrowser(): SupabaseClient {
   const { getToken } = useAuth();
@@ -14,7 +15,7 @@ export function useSupabaseBrowser(): SupabaseClient {
       createClient(url, anon, {
         global: {
           fetch: async (input, init) => {
-            const token = await getToken({ template: 'supabase' });
+            const token = await getToken({ template: clerkJwtTemplateForSupabase() });
             const headers = new Headers(init?.headers);
             if (token) headers.set('Authorization', `Bearer ${token}`);
             return fetch(input, { ...init, headers });

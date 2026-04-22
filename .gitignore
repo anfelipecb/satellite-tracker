@@ -28,6 +28,9 @@ apps/*/.env.local
 *.log
 npm-debug.log*
 
+# Assignment handouts
+docs/*.pdf
+
 # Supabase
 supabase/.branches
 supabase/.temp

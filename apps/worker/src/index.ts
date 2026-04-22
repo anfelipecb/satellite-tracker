@@ -1,5 +1,11 @@
+import { config as loadDotenv } from 'dotenv';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Cron } from 'croner';
 import { loadEnv } from './env.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+loadDotenv({ path: resolve(__dirname, '../.env') });
 import { createLogger } from './lib/logger.js';
 import { createServiceSupabase } from './lib/supabase.js';
 import { runTleSync } from './jobs/tleSync.js';
