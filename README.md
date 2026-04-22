@@ -40,6 +40,19 @@ Follow **[docs/ENV_SETUP.md](./docs/ENV_SETUP.md)** for Clerk JWT template (`sup
 
 ### Vercel (frontend)
 
+Production URL (current): `https://satellite-tracker-web.vercel.app`
+
+This repo is a **pnpm + Turborepo monorepo**. The Vercel project should use:
+
+- **Root Directory**: `apps/web`
+- **Install command** (Project Settings):  
+  `corepack enable && corepack prepare pnpm@9.15.0 --activate && pnpm install --frozen-lockfile`  
+  (This runs from the monorepo root so workspace packages resolve.)
+- **Build command**:  
+  `pnpm --filter @satellite-tracker/shared build && pnpm --filter web build`
+
+These are also checked into `apps/web/vercel.json` for CLI builds.
+
 1. New Project → import this repo.
 2. **Root Directory**: `apps/web` (or monorepo root with build override — see Vercel monorepo docs).
 3. **Install**: from repo root, `pnpm install` (if root is `apps/web`, set install command to run from parent workspace).

@@ -37,3 +37,4 @@ apps/web/public/cesium
 
 # Test
 coverage
+.vercel
