@@ -436,8 +436,8 @@ export function GlobePageClient() {
         <div className="rounded-xl border border-emerald-400/25 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-100">
           <strong className="font-semibold">{filteredRows.length}</strong> satellites from the background pool with
           elevation ≥ {minElevationDeg}° above <span className="text-emerald-50">{observer.name}</span> right now
-          (SGP4, from the most recent {rows.length} TLEs we loaded — the Mission Control "Crossing your sky now"
-          count uses N2YO's full catalog).
+          (SGP4, from the most recent {rows.length} TLEs we loaded — the Mission Control “Crossing your sky now”
+          count uses N2YO’s full catalog).
         </div>
       ) : null}
       {error ? <p className="text-sm text-rose-400">{error}</p> : null}

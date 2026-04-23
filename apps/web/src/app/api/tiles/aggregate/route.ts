@@ -1,7 +1,6 @@
 import { auth } from '@clerk/nextjs/server';
-import { createClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
-import { getSupabaseAnonKeyForServer } from '@/lib/supabase/publicKey';
+import { callRpcAnon } from '@/lib/supabase/postgrestAnon';
 
 /**
  * H3 index → observation count in time window (from granules the worker has tiled).
@@ -35,22 +34,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Missing NEXT_PUBLIC_SUPABASE_URL' }, { status: 500 });
     }
 
-    let key: string;
-    try {
-      key = getSupabaseAnonKeyForServer();
-    } catch (e) {
-      return NextResponse.json(
-        { error: e instanceof Error ? e.message : 'Supabase key configuration' },
-        { status: 500 },
-      );
-    }
-
-    const supabase = createClient(url, key, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
     const since = new Date(Date.now() - hours * 3_600_000).toISOString();
 
-    const { data, error } = await supabase.rpc('granule_tile_counts', {
+    const { data, error } = await callRpcAnon(url, 'granule_tile_counts', {
       p_mission: mission,
       p_since: since,
       p_limit: 5000,

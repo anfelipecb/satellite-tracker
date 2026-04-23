@@ -40,6 +40,8 @@ apps/web/public/cesium
 
 # Playwright MCP (local artifacts)
 .playwright-mcp/
+apps/web/e2e/.auth/
+apps/web/test-results/
 
 # Ad-hoc screenshots at repo root (dev / Playwright)
 /dashboard-*.png

@@ -6,7 +6,7 @@ Three-service system for **Design, Build, Ship · Assignment 4**:
 
 `CelesTrak + N2YO + NOAA + Launch Library → Railway worker → Supabase (Postgres + Realtime) → Next.js (Vercel)`.
 
-Users authenticate with **Clerk**. The web app requests a Clerk JWT for Supabase via `getToken({ template: … })`; the default template name is **`supabase`**, overridable with **`NEXT_PUBLIC_CLERK_SUPABASE_JWT_TEMPLATE`**. The token must be signed for Supabase (HS256 + JWT secret) per `docs/ENV_SETUP.md` or the Clerk **Supabase** integration.
+Users authenticate with **Clerk**. For Supabase RLS, the browser uses the **Clerk session** JWT: `getToken()` with **no** custom template, matching the [Supabase + Clerk third-party](https://supabase.com/docs/guides/auth/third-party/clerk) flow. Opt into a legacy **named** Clerk template only with `NEXT_PUBLIC_CLERK_USE_LEGACY_SUPABASE_JWT=1` **and** `NEXT_PUBLIC_CLERK_SUPABASE_JWT_TEMPLATE` (older HS256 “supabase” path).
 
 ## Monorepo
 
@@ -52,7 +52,7 @@ Users authenticate with **Clerk**. The web app requests a Clerk JWT for Supabase
 
 ## Pitfalls
 
-- **Clerk ↔ Supabase**: match the JWT template **slug** to `NEXT_PUBLIC_CLERK_SUPABASE_JWT_TEMPLATE` (default `supabase`); without a valid token, RLS and Realtime fail for the browser client.
+- **Clerk ↔ Supabase**: use **session** JWTs by default; a stale `NEXT_PUBLIC_CLERK_SUPABASE_JWT_TEMPLATE` without the legacy opt-in often causes PostgREST **“No suitable key or wrong key type” (PGRST301)**. Ensure Vercel and Supabase use the same Clerk **environment** (dev vs prod) as the third-party provider settings. Set **`SUPABASE_ANON_KEY`** on Vercel if server routes cannot read `NEXT_PUBLIC_*` keys.
 - **Web env**: `createClient` expects **`NEXT_PUBLIC_SUPABASE_ANON_KEY`** (legacy anon JWT) unless you standardize on newer publishable keys everywhere; keep URL + key in sync with the Supabase project.
 - **Cesium** in Next: `next dev --webpack` / `next build --webpack`; assets copied to `public/cesium`; OSM tiles as default imagery if Ion token missing.
 - **N2YO** key must not appear in client bundles — only `process.env.N2YO_API_KEY` in Route Handlers + worker.

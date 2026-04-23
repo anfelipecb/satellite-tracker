@@ -7,7 +7,9 @@
     "build": "node ./scripts/prepare-cesium.mjs && next build",
     "start": "node ./scripts/prepare-cesium.mjs && next start -p 3000",
     "lint": "next lint",
-    "test": "echo \"no web tests yet\""
+    "test": "playwright test",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@clerk/nextjs": "^6.9.14",
@@ -28,6 +30,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.51.0",
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
