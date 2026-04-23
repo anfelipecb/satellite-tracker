@@ -1,7 +1,7 @@
 import { auth } from '@clerk/nextjs/server';
 import { createClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
-import { getSupabasePublicKey } from '@/lib/supabase/publicKey';
+import { getSupabaseAnonKeyForServer } from '@/lib/supabase/publicKey';
 
 /**
  * H3 index → observation count in time window (from granules the worker has tiled).
@@ -34,7 +34,16 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Missing NEXT_PUBLIC_SUPABASE_URL' }, { status: 500 });
   }
 
-  const key = getSupabasePublicKey();
+  let key: string;
+  try {
+    key = getSupabaseAnonKeyForServer();
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : 'Supabase key configuration' },
+      { status: 500 },
+    );
+  }
+
   const supabase = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
