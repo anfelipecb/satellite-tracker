@@ -73,15 +73,9 @@ let cesiumReadyPromise: Promise<CesiumGlobal> | null = null;
 
 function getCesiumRuntime() {
   if (typeof window === 'undefined') return undefined;
-  if (window.Cesium) return window.Cesium;
-
-  try {
-    return new Function(
-      'return typeof Cesium !== "undefined" ? Cesium : (typeof globalThis !== "undefined" ? globalThis.Cesium : undefined);'
-    )() as CesiumGlobal | undefined;
-  } catch {
-    return undefined;
-  }
+  const runtime = window.Cesium ?? (globalThis as typeof window).Cesium;
+  if (runtime) window.Cesium = runtime;
+  return runtime;
 }
 
 function ensureCesium() {
