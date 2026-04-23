@@ -39,7 +39,14 @@ export async function runAbovePoller(ctx: JobContext): Promise<{
       const url = `${N2YO_BASE}/above/${loc.lat}/${loc.lon}/0/45/0/&apiKey=${encodeURIComponent(key)}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`n2yo ${res.status}`);
-      const json = await res.json();
+      const json: unknown = await res.json();
+      // N2YO signals rate limit / bad key with `{"error": "..."}` and HTTP 200.
+      // Skip instead of writing a 0 into overhead_counts (which would poison the fallback).
+      if (json && typeof json === 'object' && 'error' in json && typeof (json as { error: unknown }).error === 'string') {
+        ctx.log.warn('abovePoller upstream', loc.id, (json as { error: string }).error);
+        errors++;
+        continue;
+      }
       const parsed = n2yoAboveResponseSchema.safeParse(json);
       if (!parsed.success) throw new Error(parsed.error.message);
       const count = parsed.data.above?.length ?? parsed.data.info.satcount ?? 0;

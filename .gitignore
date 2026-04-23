@@ -41,6 +41,11 @@ apps/web/public/cesium
 # Playwright MCP (local artifacts)
 .playwright-mcp/
 
+# Ad-hoc screenshots at repo root (dev / Playwright)
+/dashboard-*.png
+/globe-*.png
+/tiles-*.png
+
 # Test
 coverage
 .vercel

@@ -1,8 +1,15 @@
 import { z } from 'zod';
 
+/**
+ * Shared shape for N2YO `info` envelopes.
+ *
+ * `satid` is only present on satellite-specific endpoints (positions / visualpasses);
+ * the `above` endpoint returns only { category, transactionscount, satcount }, which
+ * is why `satid` must be optional here.
+ */
 const n2yoInfo = z.object({
   satname: z.string().optional(),
-  satid: z.number(),
+  satid: z.number().optional(),
   transactionscount: z.number().optional(),
   passescount: z.number().optional(),
   satcount: z.number().optional(),

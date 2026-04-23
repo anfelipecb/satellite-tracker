@@ -9,6 +9,7 @@ import type { GlobePoint, GlobeSceneHandle, LivePathPoint, OrbitTrack } from '@/
 import {
   buildOrbitTrack,
   buildOrbitTrackBackward,
+  elevationDegForObserver,
   propagatePositionDeg,
   type TleRow,
 } from '@/lib/sgp4';
@@ -61,6 +62,9 @@ export function GlobePageClient() {
   const [satMetas, setSatMetas] = useState<Record<number, { name: string; category: string[] }>>({});
   const [orbitTle, setOrbitTle] = useState<TleRow[]>([]);
   const [favorites, setFavorites] = useState<{ norad_id: number; name: string }[]>([]);
+  const [observer, setObserver] = useState<{ name: string; lat: number; lon: number } | null>(null);
+  const [aboveObserverOnly, setAboveObserverOnly] = useState(false);
+  const [minElevationDeg, setMinElevationDeg] = useState<number>(0);
   const [now, setNow] = useState(() => new Date());
   const [category, setCategory] = useState<GlobeCategoryFilter>('all');
   const [globeMode, setGlobeMode] = useState<'live' | 'history'>('live');
@@ -154,17 +158,55 @@ export function GlobePageClient() {
     };
   }, [isLoaded, supabase, user]);
 
+  // Pull observer lat/lon whenever the selected location changes, so the
+  // "above my location" filter can run hemisphere tests against it.
+  useEffect(() => {
+    if (!user?.id) return;
+    if (!activeLocationId) {
+      setObserver(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase
+        .from('user_locations')
+        .select('name,lat,lon')
+        .eq('id', activeLocationId)
+        .eq('user_id', user.id)
+        .maybeSingle();
+      if (cancelled) return;
+      if (data) setObserver({ name: data.name, lat: data.lat, lon: data.lon });
+      else setObserver(null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeLocationId, supabase, user?.id]);
+
   const orbitIdSet = useMemo(() => new Set(orbitTle.map((t) => t.norad_id)), [orbitTle]);
 
+  // Candidate rows after category filter. When "above my location" is on we
+  // also remove anything below the horizon for the active observer. Expand
+  // the candidate pool from 500 to the full loaded list when filtering, since
+  // only a small fraction will remain visible.
+  const aboveFilterActive = aboveObserverOnly && Boolean(observer);
   const filteredRows = useMemo(() => {
-    if (category === 'all') return rows.slice(0, 220);
-    return rows
-      .filter((r) => {
-        const m = satMetas[r.norad_id];
-        return satelliteMatchesCategory(m?.name ?? '', m?.category, category);
-      })
-      .slice(0, 220);
-  }, [rows, satMetas, category]);
+    const byCategory =
+      category === 'all'
+        ? rows
+        : rows.filter((r) => {
+            const m = satMetas[r.norad_id];
+            return satelliteMatchesCategory(m?.name ?? '', m?.category, category);
+          });
+    if (!aboveFilterActive || !observer) return byCategory.slice(0, 220);
+    const above: TleRow[] = [];
+    for (const r of byCategory) {
+      const el = elevationDegForObserver(r, simTime, observer.lat, observer.lon);
+      if (el != null && el >= minElevationDeg) above.push(r);
+      if (above.length >= 350) break;
+    }
+    return above;
+  }, [rows, satMetas, category, aboveFilterActive, observer, simTime, minElevationDeg]);
 
   const points: GlobePoint[] = useMemo(() => {
     const byId = new Map<number, GlobePoint>();
@@ -339,11 +381,65 @@ export function GlobePageClient() {
             Reset view
           </button>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setAboveObserverOnly((v) => !v)}
+            disabled={!observer}
+            title={
+              observer
+                ? `Show only satellites above ${observer.name}'s horizon right now`
+                : 'Save or activate an observer location to enable this filter'
+            }
+            className={`rounded-full border px-3 py-1.5 text-xs transition ${
+              aboveObserverOnly
+                ? 'border-emerald-400/50 bg-emerald-500/25 text-emerald-100'
+                : 'border-white/10 text-slate-300 hover:border-white/20'
+            } disabled:cursor-not-allowed disabled:opacity-50`}
+          >
+            {aboveObserverOnly ? 'Showing above observer' : 'Only above my location'}
+          </button>
+          {aboveObserverOnly ? (
+            <label className="flex items-center gap-2 text-xs text-slate-400">
+              min elevation
+              <input
+                type="number"
+                min={-10}
+                max={85}
+                step={5}
+                value={minElevationDeg}
+                onChange={(e) => setMinElevationDeg(Math.max(-10, Math.min(85, Number(e.target.value) || 0)))}
+                className="w-16 rounded border border-white/10 bg-black/40 px-2 py-1 text-xs text-white"
+              />
+              <span className="text-slate-500">°</span>
+            </label>
+          ) : null}
+          {observer ? (
+            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-slate-300">
+              Observer: <span className="text-slate-100">{observer.name}</span>
+              <span className="ml-1 text-slate-500">
+                ({observer.lat.toFixed(2)}°, {observer.lon.toFixed(2)}°)
+              </span>
+            </span>
+          ) : (
+            <span className="rounded-full border border-white/5 bg-white/5 px-2 py-1 text-[11px] text-slate-500">
+              No active observer location
+            </span>
+          )}
+        </div>
         <p className="max-w-xl text-xs text-slate-500">
           {globeMode === 'live' ? 'Positions refresh from TLEs every 3s.' : 'Replays the last 90 minutes along each track.'} Click a
           satellite to sync selection with Mission Control. N2YO path uses your active saved location.
         </p>
       </div>
+      {aboveObserverOnly && observer ? (
+        <div className="rounded-xl border border-emerald-400/25 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-100">
+          <strong className="font-semibold">{filteredRows.length}</strong> satellites from the background pool with
+          elevation ≥ {minElevationDeg}° above <span className="text-emerald-50">{observer.name}</span> right now
+          (SGP4, from the most recent {rows.length} TLEs we loaded — the Mission Control "Crossing your sky now"
+          count uses N2YO's full catalog).
+        </div>
+      ) : null}
       {error ? <p className="text-sm text-rose-400">{error}</p> : null}
       <GlobeScene
         ref={globeRef}

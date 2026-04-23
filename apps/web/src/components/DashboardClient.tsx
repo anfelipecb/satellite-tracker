@@ -55,7 +55,9 @@ type FavoriteSatellite = {
 type WorkerCounts = {
   sgp4: number | null;
   n2yo: number | null;
-  lastUpdated: string | null;
+  /** Latest worker sample time per source (overhead_counts.ts_minute) */
+  sgp4Ts: string | null;
+  n2yoTs: string | null;
 };
 
 function fmtCoord(value: number, positive: string, negative: string) {
@@ -113,9 +115,19 @@ export function DashboardClient() {
   const [workerCounts, setWorkerCounts] = useState<WorkerCounts>({
     sgp4: null,
     n2yo: null,
-    lastUpdated: null,
+    sgp4Ts: null,
+    n2yoTs: null,
   });
   const [liveAboveCount, setLiveAboveCount] = useState<number | null>(null);
+  const [liveAboveError, setLiveAboveError] = useState<string | null>(null);
+  const [liveAboveRefreshedAt, setLiveAboveRefreshedAt] = useState<string | null>(null);
+  const [liveAboveCacheSource, setLiveAboveCacheSource] = useState<'live' | 'db' | null>(null);
+  const [liveAboveFallback, setLiveAboveFallback] = useState<{
+    count: number;
+    ts: string;
+    source: 'n2yo' | 'sgp4';
+  } | null>(null);
+  const [skyStripFlash, setSkyStripFlash] = useState(false);
   const [passSummary, setPassSummary] = useState<string | null>(null);
   const [livePath, setLivePath] = useState<LivePathPoint[] | null>(null);
   const [backgroundRows, setBackgroundRows] = useState<TleRow[]>([]);
@@ -129,6 +141,8 @@ export function DashboardClient() {
   const [locationLat, setLocationLat] = useState('41.8781');
   const [locationLon, setLocationLon] = useState('-87.6298');
   const [showManualCoords, setShowManualCoords] = useState(false);
+  /** Set after picking a city from search; press “Save location” to persist (avoids failed silent inserts). */
+  const [stagedGeocode, setStagedGeocode] = useState<GeocodeResult | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [loadingSearch, setLoadingSearch] = useState(false);
   const [loadingPath, setLoadingPath] = useState(false);
@@ -227,8 +241,7 @@ export function DashboardClient() {
 
   const refreshWorkerCounts = useCallback(async () => {
     if (!selectedLocation) {
-      setWorkerCounts({ sgp4: null, n2yo: null, lastUpdated: null });
-      setLiveAboveCount(null);
+      setWorkerCounts({ sgp4: null, n2yo: null, sgp4Ts: null, n2yoTs: null });
       return;
     }
 
@@ -237,34 +250,112 @@ export function DashboardClient() {
       .select('count,source,ts_minute')
       .eq('user_location_id', selectedLocation.id)
       .order('ts_minute', { ascending: false })
-      .limit(20);
+      .limit(40);
 
-    const latestSgp4 = data?.find((row) => row.source === 'sgp4');
-    const latestN2yo = data?.find((row) => row.source === 'n2yo');
+    let sgp4: number | null = null;
+    let sgp4Ts: string | null = null;
+    let n2yo: number | null = null;
+    let n2yoTs: string | null = null;
+    for (const row of data ?? []) {
+      if (row.source === 'sgp4' && sgp4 === null) {
+        sgp4 = row.count;
+        sgp4Ts = row.ts_minute;
+      }
+      if (row.source === 'n2yo' && n2yo === null) {
+        n2yo = row.count;
+        n2yoTs = row.ts_minute;
+      }
+      if (sgp4 !== null && n2yo !== null) break;
+    }
 
-    setWorkerCounts({
-      sgp4: latestSgp4?.count ?? null,
-      n2yo: latestN2yo?.count ?? null,
-      lastUpdated: latestSgp4?.ts_minute ?? latestN2yo?.ts_minute ?? null,
-    });
+    setWorkerCounts({ sgp4, n2yo, sgp4Ts, n2yoTs });
+  }, [selectedLocation, supabase]);
+
+  /**
+   * Read the most recent worker-persisted overhead count so we have a fallback
+   * whenever the live N2YO API is unavailable (rate-limited, misconfigured, etc.).
+   * Prefers the worker's n2yo row; falls back to sgp4 if no n2yo row is present.
+   */
+  const loadFallbackAbove = useCallback(async () => {
+    if (!selectedLocation) return null;
+    const { data } = await supabase
+      .from('overhead_counts')
+      .select('count,source,ts_minute')
+      .eq('user_location_id', selectedLocation.id)
+      .in('source', ['n2yo', 'sgp4'])
+      .order('ts_minute', { ascending: false })
+      .limit(10);
+    const rows = (data ?? []) as { count: number; source: 'n2yo' | 'sgp4'; ts_minute: string }[];
+    const n2yoRow = rows.find((r) => r.source === 'n2yo');
+    const chosen = n2yoRow ?? rows[0];
+    if (!chosen) return null;
+    return { count: chosen.count, ts: chosen.ts_minute, source: chosen.source };
   }, [selectedLocation, supabase]);
 
   const refreshAboveSnapshot = useCallback(async () => {
     if (!selectedLocation) return;
     setLoadingAbove(true);
+    setLiveAboveError(null);
     try {
       const res = await fetch(
-        `/api/n2yo/above?lat=${selectedLocation.lat}&lng=${selectedLocation.lon}&alt=0&radius=45&category=0`
+        // radius=90 matches n2yo.com's "crossing your sky now" (full hemisphere above the observer);
+        // locationId enables the Next route's DB read-through cache so we don't spend rate budget if
+        // the worker already has a fresh sample for this location.
+        `/api/n2yo/above?lat=${selectedLocation.lat}&lng=${selectedLocation.lon}&alt=0&radius=90&category=0&locationId=${encodeURIComponent(selectedLocation.id)}`,
       );
-      if (!res.ok) throw new Error('Unable to fetch live above snapshot');
-      const body = (await res.json()) as N2yoAboveResponse;
-      setLiveAboveCount(body.above?.length ?? body.info.satcount ?? null);
+      const raw: unknown = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errBody = raw as { error?: unknown; upstream?: string; message?: string; retryAfter?: number };
+        const asErr = errBody.error;
+        const errStr =
+          typeof asErr === 'string'
+            ? asErr
+            : asErr && typeof asErr === 'object'
+              ? JSON.stringify(asErr)
+              : errBody.message;
+        let msg =
+          errStr ??
+          (res.status === 401
+            ? 'Sign in required'
+            : res.status === 429
+              ? 'Too many N2YO requests'
+              : res.status === 502
+                ? 'N2YO response could not be parsed'
+                : res.status === 400
+                  ? 'Invalid location parameters'
+                  : `Request failed (${res.status})`);
+        if (errBody.upstream) msg += ` — ${errBody.upstream}`;
+        if (res.status === 429 && errBody.retryAfter != null) {
+          const s = errBody.retryAfter;
+          const label = s >= 3600 ? `${Math.round(s / 3600)}h` : s >= 60 ? `${Math.round(s / 60)}m` : `${s}s`;
+          msg += ` · retry in ${label}`;
+        }
+        if (res.status === 500) msg += ' · set N2YO_API_KEY for the Next server (e.g. .env.local)';
+        const fb = await loadFallbackAbove();
+        if (fb) setLiveAboveFallback(fb);
+        setLiveAboveError(msg);
+        return;
+      }
+      const body = raw as N2yoAboveResponse & {
+        cache?: { source: 'live' | 'db'; ts: string; ttlSeconds: number };
+      };
+      // Cached DB responses come back with above=[] to save bandwidth, so prefer
+      // the explicit satcount from info (falling back to above.length for live).
+      const n = body.info?.satcount ?? body.above?.length ?? 0;
+      setLiveAboveCount(n);
+      setLiveAboveFallback(null);
+      setLiveAboveCacheSource(body.cache?.source ?? 'live');
+      setLiveAboveRefreshedAt(body.cache?.ts ?? new Date().toISOString());
+      setSkyStripFlash(true);
+      window.setTimeout(() => setSkyStripFlash(false), 700);
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : 'Unable to fetch live above snapshot');
+      const fb = await loadFallbackAbove();
+      if (fb) setLiveAboveFallback(fb);
+      setLiveAboveError(error instanceof Error ? error.message : 'Network error');
     } finally {
       setLoadingAbove(false);
     }
-  }, [selectedLocation]);
+  }, [selectedLocation, loadFallbackAbove]);
 
   const refreshLiveTrack = useCallback(async () => {
     if (!selectedLocation || !selectedSatellite) {
@@ -333,9 +424,22 @@ export function DashboardClient() {
   }, [refreshWorkerCounts]);
 
   useEffect(() => {
-    if (!selectedLocation) return;
+    if (!selectedLocation) {
+      setLiveAboveCount(null);
+      setLiveAboveError(null);
+      setLiveAboveRefreshedAt(null);
+      setLiveAboveFallback(null);
+      setLiveAboveCacheSource(null);
+      return;
+    }
     void refreshAboveSnapshot();
   }, [refreshAboveSnapshot, selectedLocation]);
+
+  useEffect(() => {
+    if (!selectedLocation) return;
+    const id = window.setInterval(() => void refreshAboveSnapshot(), 90_000);
+    return () => window.clearInterval(id);
+  }, [selectedLocation, refreshAboveSnapshot]);
 
   useEffect(() => {
     if (!selectedLocation || !selectedSatellite) return;
@@ -452,44 +556,37 @@ export function DashboardClient() {
       );
   }, [favoriteRows, favorites, now, selectedLocation]);
 
-  async function handleLocationSave(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function saveLocation(event?: React.FormEvent) {
+    event?.preventDefault();
     if (!user?.id) return;
 
-    const { data, error } = await supabase
-      .from('user_locations')
-      .insert({
-        user_id: user.id,
-        name: locationName,
-        lat: Number(locationLat),
-        lon: Number(locationLon),
-        radius_km: 0,
-        last_viewed_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single();
+    let name: string;
+    let lat: number;
+    let lon: number;
 
-    if (error) {
-      setStatusMessage(error.message);
+    if (stagedGeocode) {
+      name = [stagedGeocode.name, stagedGeocode.country].filter(Boolean).join(', ');
+      lat = stagedGeocode.lat;
+      lon = stagedGeocode.lon;
+    } else if (showManualCoords) {
+      name = locationName;
+      lat = Number(locationLat);
+      lon = Number(locationLon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        setStatusMessage('Enter valid latitude and longitude');
+        return;
+      }
+    } else {
       return;
     }
 
-    setStatusMessage(null);
-    setLocationName('Home');
-    if (data?.id) setActiveLocationId(data.id);
-    await refreshOverview();
-  }
-
-  async function handleGeocodePicked(r: GeocodeResult) {
-    if (!user?.id) return;
-    const name = [r.name, r.country].filter(Boolean).join(', ');
     const { data, error } = await supabase
       .from('user_locations')
       .insert({
         user_id: user.id,
         name,
-        lat: r.lat,
-        lon: r.lon,
+        lat,
+        lon,
         radius_km: 0,
         last_viewed_at: new Date().toISOString(),
       })
@@ -500,12 +597,22 @@ export function DashboardClient() {
       setStatusMessage(error.message);
       return;
     }
+
     setStatusMessage(null);
+    setStagedGeocode(null);
     setLocationName('Home');
-    setLocationLat(String(r.lat));
-    setLocationLon(String(r.lon));
+    setLocationLat(String(lat));
+    setLocationLon(String(lon));
     if (data?.id) setActiveLocationId(data.id);
     await refreshOverview();
+  }
+
+  function handleCityStaged(r: GeocodeResult) {
+    setStatusMessage(null);
+    setStagedGeocode(r);
+    setLocationName([r.name, r.country].filter(Boolean).join(', '));
+    setLocationLat(String(r.lat));
+    setLocationLon(String(r.lon));
   }
 
   async function handleLocationDelete(id: string) {
@@ -588,200 +695,91 @@ export function DashboardClient() {
 
   return (
     <div className="space-y-6">
-      <section className="grid gap-4 xl:grid-cols-[1.6fr_0.9fr]">
-        <div className="overflow-hidden rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_top,#11324d_0%,#08101c_44%,#030507_100%)] p-5 shadow-[0_20px_80px_rgba(0,0,0,0.45)]">
-          <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p className="text-xs uppercase tracking-[0.35em] text-cyan-300/70">Mission Control</p>
-              <h2 className="mt-2 text-3xl font-semibold tracking-tight text-white">
-                Real-time globe, live counters, and tracked orbit paths
-              </h2>
-              <p className="mt-2 max-w-2xl text-sm text-slate-300">
-                The globe updates from TLE propagation every few seconds. Worker counts stream from Supabase
-                Realtime, and the selected favorite overlays an N2YO live path when available.
-              </p>
-            </div>
-            <div className="grid gap-2 text-right text-xs text-slate-300">
-              <span className="rounded-full border border-cyan-400/25 bg-cyan-400/10 px-3 py-1">
-                Kp index: <strong className="text-white">{kp ?? '—'}</strong>
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                Focus: <strong className="text-white">{selectedSatellite?.name ?? 'Pick a favorite'}</strong>
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                Location: <strong className="text-white">{selectedLocation?.name ?? 'Save a location'}</strong>
-              </span>
-            </div>
-          </div>
-          <div className="mb-2 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                if (selectedSatellite) globeRef.current?.focusOnSatellite(selectedSatellite.norad_id);
-              }}
-              disabled={!selectedSatellite}
-              className="rounded-full border border-rose-400/40 bg-rose-500/20 px-3 py-1.5 text-xs font-medium text-rose-100 disabled:opacity-40"
-            >
-              Focus camera
-            </button>
-            <button
-              type="button"
-              onClick={() => globeRef.current?.resetView()}
-              className="rounded-full border border-white/20 px-3 py-1.5 text-xs text-slate-200"
-            >
-              Reset view
-            </button>
-          </div>
-          <GlobeScene
-            ref={globeRef}
-            points={[...backgroundPoints, ...favoritePoints]}
-            tracks={orbitTracks}
-            livePath={livePath}
-            observer={observerPoint}
-            onPointClick={onGlobePointClick}
-          />
-        </div>
-
-        <div className="grid gap-4">
-          <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
-            <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Overhead Counter</p>
-            <div className="mt-4 grid grid-cols-3 gap-3">
-              <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Worker SGP4</p>
-                <p className="mt-2 text-3xl font-semibold text-white">
-                  <AnimatedNumber value={workerCounts.sgp4} />
-                </p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Worker N2YO</p>
-                <p className="mt-2 text-3xl font-semibold text-white">
-                  <AnimatedNumber value={workerCounts.n2yo} />
-                </p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Live Above</p>
-                <p className="mt-2 text-3xl font-semibold text-white">
-                  <AnimatedNumber value={liveAboveCount} />
-                </p>
-              </div>
-            </div>
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-              <span>{relativeTime(workerCounts.lastUpdated)}</span>
-              <button
-                type="button"
-                onClick={() => void refreshAboveSnapshot()}
-                disabled={!selectedLocation || loadingAbove}
-                className="rounded-full border border-cyan-400/30 px-3 py-1 text-cyan-200 transition hover:border-cyan-300 disabled:opacity-50"
-              >
-                {loadingAbove ? 'Refreshing…' : 'Refresh live count'}
-              </button>
-            </div>
-          </div>
-
-          <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Tracked Satellite</p>
-                <h3 className="mt-2 text-xl font-semibold text-white">
-                  {selectedSatellite?.name ?? 'Add a favorite to start tracking'}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => void refreshLiveTrack()}
-                disabled={!selectedLocation || !selectedSatellite || loadingPath}
-                className="rounded-full bg-rose-400 px-4 py-2 text-sm font-medium text-slate-950 disabled:opacity-50"
-              >
-                {loadingPath ? 'Syncing…' : 'Refresh live path'}
-              </button>
-            </div>
-
-            {focusPoint ? (
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Current Position</p>
-                  <p className="mt-2 text-sm text-white">
-                    {fmtCoord(focusPoint.lat, 'N', 'S')} · {fmtCoord(focusPoint.lon, 'E', 'W')}
-                  </p>
-                  <p className="mt-1 text-xs text-slate-400">{focusPoint.altKm.toFixed(0)} km altitude</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Pass Intelligence</p>
-                  <p className="mt-2 text-sm text-slate-200">{passSummary ?? 'Waiting for N2YO pass data.'}</p>
-                </div>
-              </div>
-            ) : (
-              <p className="mt-4 text-sm text-slate-400">Select a tracked satellite to see its orbit and telemetry.</p>
-            )}
-          </div>
-
-          <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
-            <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Upcoming Launches</p>
-            <ul className="mt-4 space-y-3">
-              {launches.map((launch) => (
-                <li key={launch.id} className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                  <p className="text-sm font-medium text-white">{launch.name}</p>
-                  <p className="mt-1 text-xs text-cyan-200/90">
-                    <LaunchCountdown netUtc={launch.net_utc} />
-                  </p>
-                  <p className="mt-0.5 text-xs text-slate-400">
-                    {fmtDateTime(launch.net_utc)} · {launch.status ?? 'Unknown status'}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      </section>
+      <p className="text-xs text-slate-500">
+        Start with your observer location and satellite picks; the globe and live panels use them below.
+      </p>
 
       <section className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr_0.9fr]">
         <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Saved Locations</p>
-              <h3 className="mt-2 text-xl font-semibold text-white">Observer presets for the counter</h3>
+              <p className="text-xs uppercase tracking-[0.28em] text-slate-400">1 · Observer location</p>
+              <h3 className="mt-2 text-xl font-semibold text-white">Saved locations for passes &amp; globe</h3>
             </div>
             <span className="text-xs text-slate-500">{locations.length} saved</span>
           </div>
 
           <div className="mt-4 space-y-4">
-            <CityLookupForm
-              onPicked={(r) => void handleGeocodePicked(r)}
-              onStatus={setStatusMessage}
-            />
+            <CityLookupForm onPicked={handleCityStaged} onStatus={setStatusMessage} />
+            {stagedGeocode ? (
+              <p className="text-sm text-slate-300">
+                Selected:{' '}
+                <span className="font-medium text-white">
+                  {[stagedGeocode.name, stagedGeocode.country].filter(Boolean).join(', ')}
+                </span>
+                <span className="text-slate-500"> — press Save to add it to your list.</span>
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void saveLocation()}
+                disabled={!user?.id || !stagedGeocode}
+                className="rounded-full bg-cyan-300 px-4 py-2.5 text-sm font-medium text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
+                title={!stagedGeocode ? 'Pick a city in the search results first' : undefined}
+              >
+                Save location
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-500">
+              Pick a place from the list, then <strong className="text-slate-400">Save location</strong>. For raw
+              coordinates, add them manually below.
+            </p>
             <button
               type="button"
-              onClick={() => setShowManualCoords((v) => !v)}
+              onClick={() => {
+                setShowManualCoords((v) => !v);
+                if (showManualCoords) setStagedGeocode(null);
+              }}
               className="text-xs text-cyan-300/80 underline-offset-2 hover:underline"
             >
               {showManualCoords ? 'Hide' : 'Add'} manual coordinates
             </button>
             {showManualCoords ? (
-              <form onSubmit={handleLocationSave} className="grid gap-3 md:grid-cols-2">
+              <form onSubmit={saveLocation} className="grid gap-3 md:grid-cols-2">
                 <input
                   value={locationName}
-                  onChange={(event) => setLocationName(event.target.value)}
+                  onChange={(event) => {
+                    setStagedGeocode(null);
+                    setLocationName(event.target.value);
+                  }}
                   placeholder="Location name"
                   className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
                 />
                 <div className="md:col-span-1" />
                 <input
                   value={locationLat}
-                  onChange={(event) => setLocationLat(event.target.value)}
+                  onChange={(event) => {
+                    setStagedGeocode(null);
+                    setLocationLat(event.target.value);
+                  }}
                   placeholder="Latitude"
                   className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
                 />
                 <input
                   value={locationLon}
-                  onChange={(event) => setLocationLon(event.target.value)}
+                  onChange={(event) => {
+                    setStagedGeocode(null);
+                    setLocationLon(event.target.value);
+                  }}
                   placeholder="Longitude"
                   className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
                 />
                 <button
                   type="submit"
-                  className="md:col-span-2 rounded-full bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950"
+                  className="md:col-span-2 rounded-full border border-cyan-400/40 bg-cyan-400/20 px-4 py-3 text-sm font-medium text-cyan-100"
                 >
-                  Save location
+                  Save manual location
                 </button>
               </form>
             ) : null}
@@ -833,7 +831,7 @@ export function DashboardClient() {
         </div>
 
         <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
-          <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Satellite Tracking</p>
+          <p className="text-xs uppercase tracking-[0.28em] text-slate-400">2 · Satellite tracking</p>
           <h3 className="mt-2 text-xl font-semibold text-white">Find satellites and add favorites</h3>
 
           <form onSubmit={handleSearch} className="mt-4 flex gap-2">
@@ -872,8 +870,8 @@ export function DashboardClient() {
         </div>
 
         <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
-          <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Favorites in Orbit</p>
-          <h3 className="mt-2 text-xl font-semibold text-white">Tracked satellites on the globe</h3>
+          <p className="text-xs uppercase tracking-[0.28em] text-slate-400">3 · Favorites in orbit</p>
+          <h3 className="mt-2 text-xl font-semibold text-white">On the globe &amp; N2YO</h3>
 
           <div className="mt-4 space-y-3">
             {favoriteTelemetry.length ? (
@@ -921,6 +919,222 @@ export function DashboardClient() {
                 Add favorites to project their predicted orbit and current position on the globe.
               </p>
             )}
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[1.6fr_0.9fr]">
+        <div className="overflow-hidden rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_top,#11324d_0%,#08101c_44%,#030507_100%)] p-5 shadow-[0_20px_80px_rgba(0,0,0,0.45)]">
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-[0.35em] text-cyan-300/70">Mission Control</p>
+              <h2 className="mt-2 text-3xl font-semibold tracking-tight text-white">Globe · full orbital context</h2>
+              <p className="mt-2 max-w-2xl text-sm text-slate-300">
+                Background catalog and your favorites paint the full sky. Use the live strip on the right for counts
+                and focus; the globe is the wide view—orbits, passes, and camera controls.
+              </p>
+            </div>
+            <div className="grid gap-2 text-right text-xs text-slate-300">
+              <span className="rounded-full border border-cyan-400/25 bg-cyan-400/10 px-3 py-1">
+                Kp index: <strong className="text-white">{kp ?? '—'}</strong>
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                Focus: <strong className="text-white">{selectedSatellite?.name ?? 'Pick a favorite'}</strong>
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                Location: <strong className="text-white">{selectedLocation?.name ?? 'Save a location'}</strong>
+              </span>
+            </div>
+          </div>
+          <div className="mb-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (selectedSatellite) globeRef.current?.focusOnSatellite(selectedSatellite.norad_id);
+              }}
+              disabled={!selectedSatellite}
+              className="rounded-full border border-rose-400/40 bg-rose-500/20 px-3 py-1.5 text-xs font-medium text-rose-100 disabled:opacity-40"
+            >
+              Focus camera
+            </button>
+            <button
+              type="button"
+              onClick={() => globeRef.current?.resetView()}
+              className="rounded-full border border-white/20 px-3 py-1.5 text-xs text-slate-200"
+            >
+              Reset view
+            </button>
+          </div>
+          <GlobeScene
+            ref={globeRef}
+            points={[...backgroundPoints, ...favoritePoints]}
+            tracks={orbitTracks}
+            livePath={livePath}
+            observer={observerPoint}
+            onPointClick={onGlobePointClick}
+          />
+        </div>
+
+        <div className="grid gap-4">
+          <div className="overflow-hidden rounded-[1.75rem] border border-cyan-400/20 bg-gradient-to-br from-cyan-950/50 via-[#0a1520] to-rose-950/30 p-5 shadow-[0_0_40px_rgba(34,211,238,0.08)]">
+            <p className="text-xs uppercase tracking-[0.3em] text-cyan-300/80">Live mission strip</p>
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div
+                className={`rounded-2xl border border-cyan-400/25 bg-black/35 p-4 transition-shadow duration-500 ${
+                  loadingAbove ? 'opacity-80' : ''
+                } ${skyStripFlash ? 'ring-2 ring-cyan-300/50 shadow-[0_0_24px_rgba(34,211,238,0.25)]' : ''}`}
+              >
+                <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-cyan-200/90">Crossing your sky now</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  What an observer in <span className="text-slate-200">{selectedLocation?.name ?? '—'}</span> could
+                  see above the horizon right now — from N2YO (full hemisphere · radius 90°, category 0).
+                </p>
+                <p className="mt-3 text-5xl font-semibold tabular-nums tracking-tight text-white">
+                  {loadingAbove ? (
+                    <span className="inline-block h-12 w-16 animate-pulse rounded bg-white/10" />
+                  ) : liveAboveError ? (
+                    liveAboveFallback ? (
+                      <span className="text-amber-300">
+                        <AnimatedNumber value={liveAboveFallback.count} className="tabular-nums" />
+                      </span>
+                    ) : (
+                      <span className="text-lg text-rose-300">—</span>
+                    )
+                  ) : (
+                    <AnimatedNumber value={liveAboveCount} className="tabular-nums" />
+                  )}
+                </p>
+                {liveAboveError ? (
+                  <div className="mt-2 space-y-1">
+                    {liveAboveFallback ? (
+                      <p className="text-[11px] font-medium uppercase tracking-wider text-amber-300/90">
+                        Worker fallback · {liveAboveFallback.source.toUpperCase()} ·{' '}
+                        {relativeTime(liveAboveFallback.ts)}
+                      </p>
+                    ) : null}
+                    <p className="text-xs text-rose-300/95">{liveAboveError}</p>
+                    {liveAboveFallback ? (
+                      <p className="text-[10px] text-slate-500">
+                        Live N2YO unavailable — showing the worker&apos;s persisted snapshot from Supabase.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-[11px] text-slate-500">
+                    {liveAboveRefreshedAt ? (
+                      <>
+                        <span
+                          className={`mr-1 inline-flex items-center gap-1 rounded-full border px-1.5 py-[1px] font-mono text-[10px] uppercase tracking-wider ${
+                            liveAboveCacheSource === 'db'
+                              ? 'border-emerald-400/50 bg-emerald-500/10 text-emerald-200'
+                              : 'border-cyan-400/50 bg-cyan-500/10 text-cyan-200'
+                          }`}
+                        >
+                          {liveAboveCacheSource === 'db' ? 'worker cache' : 'live n2yo'}
+                        </span>
+                        {liveAboveCacheSource === 'db'
+                          ? `sample ${relativeTime(liveAboveRefreshedAt)} · TTL 60s · auto every 90s`
+                          : `refreshed ${new Date(liveAboveRefreshedAt).toLocaleTimeString()} · auto every 90s`}
+                      </>
+                    ) : selectedLocation ? (
+                      'Fetching…'
+                    ) : (
+                      'Save a location to query N2YO'
+                    )}
+                  </p>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void refreshAboveSnapshot()}
+                  disabled={!selectedLocation || loadingAbove}
+                  className="mt-3 rounded-full border border-cyan-400/40 bg-cyan-500/15 px-4 py-2 text-xs font-medium text-cyan-100 transition hover:bg-cyan-500/25 disabled:opacity-40"
+                >
+                  {loadingAbove ? 'Refreshing…' : 'Refresh now'}
+                </button>
+              </div>
+              <div className="rounded-2xl border border-rose-400/20 bg-black/35 p-4">
+                <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-rose-200/90">Your focus</p>
+                <p className="mt-3 text-xl font-semibold leading-tight text-white">
+                  {selectedSatellite?.name ?? 'No favorite selected'}
+                </p>
+                <p className="mt-2 text-sm text-slate-400">
+                  {selectedSatellite ? <>NORAD {selectedSatellite.norad_id}</> : 'Add a satellite below to lock the globe &amp; path'}
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 border-t border-white/10 pt-4">
+              <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Worker pipeline (last samples)</p>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
+                  <span className="text-slate-500">SGP4 catalog est.</span>
+                  <p className="text-lg font-medium text-slate-200">
+                    <AnimatedNumber value={workerCounts.sgp4} />
+                  </p>
+                  <p className="text-[10px] text-slate-600">{workerCounts.sgp4Ts ? relativeTime(workerCounts.sgp4Ts) : '—'}</p>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
+                  <span className="text-slate-500">Worker N2YO poll</span>
+                  <p className="text-lg font-medium text-slate-200">
+                    <AnimatedNumber value={workerCounts.n2yo} />
+                  </p>
+                  <p className="text-[10px] text-slate-600">{workerCounts.n2yoTs ? relativeTime(workerCounts.n2yoTs) : '—'}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Position &amp; passes</p>
+                <h3 className="mt-2 text-lg font-semibold text-white">
+                  {selectedSatellite?.name ?? 'Pick a tracked satellite'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshLiveTrack()}
+                disabled={!selectedLocation || !selectedSatellite || loadingPath}
+                className="rounded-full bg-rose-400 px-4 py-2 text-sm font-medium text-slate-950 disabled:opacity-50"
+              >
+                {loadingPath ? 'Syncing…' : 'Refresh live path'}
+              </button>
+            </div>
+
+            {focusPoint ? (
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Current Position</p>
+                  <p className="mt-2 text-sm text-white">
+                    {fmtCoord(focusPoint.lat, 'N', 'S')} · {fmtCoord(focusPoint.lon, 'E', 'W')}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-400">{focusPoint.altKm.toFixed(0)} km altitude</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Pass Intelligence</p>
+                  <p className="mt-2 text-sm text-slate-200">{passSummary ?? 'Waiting for N2YO pass data.'}</p>
+                </div>
+              </div>
+            ) : (
+              <p className="mt-4 text-sm text-slate-400">Select a tracked satellite to see its orbit and telemetry.</p>
+            )}
+          </div>
+
+          <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
+            <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Upcoming Launches</p>
+            <ul className="mt-4 space-y-3">
+              {launches.map((launch) => (
+                <li key={launch.id} className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                  <p className="text-sm font-medium text-white">{launch.name}</p>
+                  <p className="mt-1 text-xs text-cyan-200/90">
+                    <LaunchCountdown netUtc={launch.net_utc} />
+                  </p>
+                  <p className="mt-0.5 text-xs text-slate-400">
+                    {fmtDateTime(launch.net_utc)} · {launch.status ?? 'Unknown status'}
+                  </p>
+                </li>
+              ))}
+            </ul>
           </div>
         </div>
       </section>

@@ -12,7 +12,10 @@ export async function createSupabaseServerClient(): Promise<SupabaseClient> {
   const key = getSupabasePublicKey();
   const template = clerkJwtTemplateForSupabase();
   return createClient(url, key, {
-    accessToken: async () => (await getToken({ template })) ?? null,
+    accessToken: async () => {
+      if (template) return (await getToken({ template })) ?? null;
+      return (await getToken()) ?? null;
+    },
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }

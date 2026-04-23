@@ -4,6 +4,11 @@ import { createSupabaseServerClient } from '@/lib/supabase/server';
 
 /**
  * H3 index → observation count in time window (from granules the worker has tiled).
+ *
+ * Uses the `granule_tile_counts(p_mission, p_since)` RPC to do the aggregation
+ * server-side in a single SQL query. The previous client-side fan-out was
+ * hitting PostgREST's default 1 000-row limit per batch and silently capping
+ * "Total observations" at 5 000 even when the DB held millions of tiles.
  */
 export async function GET(request: NextRequest) {
   const { userId } = await auth();
@@ -12,7 +17,7 @@ export async function GET(request: NextRequest) {
   }
 
   const mission = request.nextUrl.searchParams.get('mission')?.trim() ?? 'MOD09GA';
-  const hours = Math.min(168, Math.max(1, Number(request.nextUrl.searchParams.get('hours') ?? 24) || 24));
+  const hours = Math.min(720, Math.max(1, Number(request.nextUrl.searchParams.get('hours') ?? 24) || 24));
   if (mission.length < 2 || mission.length > 64) {
     return NextResponse.json({ error: 'Invalid mission' }, { status: 400 });
   }
@@ -20,40 +25,22 @@ export async function GET(request: NextRequest) {
   const supabase = await createSupabaseServerClient();
   const since = new Date(Date.now() - hours * 3_600_000).toISOString();
 
-  const { data: granules, error: gErr } = await supabase
-    .from('granules')
-    .select('id')
-    .eq('mission', mission)
-    .gte('acquired_at', since)
-    .limit(8_000);
+  const { data, error } = await supabase.rpc('granule_tile_counts', {
+    p_mission: mission,
+    p_since: since,
+    p_limit: 5000,
+  });
 
-  if (gErr) {
-    return NextResponse.json({ error: gErr.message }, { status: 500 });
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const ids = (granules as { id: string }[] | null)?.map((g) => g.id) ?? [];
-  if (!ids.length) {
-    return NextResponse.json({ cells: [] as { h3_index: string; count: number }[] });
-  }
-
-  const counts = new Map<string, number>();
-  for (let i = 0; i < ids.length; i += 200) {
-    const chunk = ids.slice(i, i + 200);
-    const { data: tiles, error: tErr } = await supabase.from('granule_tiles').select('h3_index').in('granule_id', chunk);
-    if (tErr) {
-      return NextResponse.json({ error: tErr.message }, { status: 500 });
-    }
-    for (const row of (tiles as { h3_index: string }[] | null) ?? []) {
-      counts.set(row.h3_index, (counts.get(row.h3_index) ?? 0) + 1);
-    }
-  }
-
-  const cells = [...counts.entries()]
-    .map(([h3_index, count]) => ({ h3_index, count }))
-    .sort((a, b) => b.count - a.count);
+  // RPC returns a single jsonb blob (array) to bypass PostgREST's 1 000-row
+  // pagination cap. Cast defensively in case it comes back as null.
+  const cells = (data as { h3_index: string; count: number }[] | null) ?? [];
 
   return NextResponse.json(
     { cells },
-    { headers: { 'Cache-Control': 's-maxage=30, stale-while-revalidate=60' } }
+    { headers: { 'Cache-Control': 's-maxage=30, stale-while-revalidate=60' } },
   );
 }

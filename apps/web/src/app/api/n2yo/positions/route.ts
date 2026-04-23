@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { n2yoPositionsResponseSchema } from '@satellite-tracker/shared';
 import { assertN2yoRateLimit } from '@/lib/n2yoDebounce';
+import { classifyN2yoUpstream } from '@/lib/n2yoUpstream';
 
 const querySchema = z.object({
   id: z.coerce.number().int().positive(),
@@ -39,6 +40,8 @@ export async function GET(req: Request) {
   const upstream = `${N2YO_BASE}/positions/${id}/${lat}/${lng}/${alt}/${seconds}/&apiKey=${encodeURIComponent(key)}`;
   const res = await fetch(upstream);
   const json: unknown = await res.json();
+  const upstreamError = classifyN2yoUpstream(json);
+  if (upstreamError) return upstreamError;
   const body = n2yoPositionsResponseSchema.safeParse(json);
   if (!body.success) {
     return NextResponse.json({ error: 'Invalid N2YO response', details: body.error.flatten() }, { status: 502 });

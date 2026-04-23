@@ -15,7 +15,11 @@ export function useSupabaseBrowser(): SupabaseClient {
   return useMemo(
     () =>
       createClient(url, key, {
-        accessToken: async () => (await session?.getToken({ template })) ?? null,
+        accessToken: async () => {
+          if (!session) return null;
+          if (template) return (await session.getToken({ template })) ?? null;
+          return (await session.getToken()) ?? null;
+        },
       }),
     [key, session, template, url]
   );

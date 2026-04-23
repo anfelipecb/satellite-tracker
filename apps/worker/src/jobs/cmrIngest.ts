@@ -13,8 +13,18 @@ const MISSIONS = [
 
 const H3_RES = 4;
 const MAX_PAGE = 200;
+const MAX_PAGES_PER_MISSION = 5; // 5 × 200 = up to 1000 granules per mission per run
 const H3_CELLS_PER_GRANULE = 5_000;
 
+/**
+ * CMR granule feed schema.
+ *
+ * Gotcha: the CMR REST response wraps `polygons` as `string[][]` — the outer
+ * array is "list of polygons", each polygon is a list of rings, each ring is
+ * a space-separated "lat lon lat lon …" string. `boxes` is a flat string[].
+ * Previously we treated both as string[], which made every entry fail Zod
+ * validation and quietly ingested zero granules.
+ */
 const feedSchema = z.object({
   feed: z
     .object({
@@ -25,7 +35,7 @@ const feedSchema = z.object({
             title: z.string().optional(),
             time_start: z.string().optional(),
             updated: z.string().optional(),
-            polygons: z.array(z.string()).optional(),
+            polygons: z.array(z.array(z.string())).optional(),
             boxes: z.array(z.string()).optional(),
             collection_concept_id: z.string().optional(),
           })
@@ -67,11 +77,14 @@ function parseBox(s: string): LonLat[] | null {
   ];
 }
 
-function ringsFromEntry(entry: { polygons?: string[]; boxes?: string[] }): LonLat[][] {
+function ringsFromEntry(entry: { polygons?: string[][]; boxes?: string[] }): LonLat[][] {
   const rings: LonLat[][] = [];
+  // CMR polygons are string[][] — outer = polygons, inner = rings per polygon.
   for (const poly of entry.polygons ?? []) {
-    const r = parsePolygonRing(poly);
-    if (r) rings.push(r);
+    for (const ring of poly) {
+      const r = parsePolygonRing(ring);
+      if (r) rings.push(r);
+    }
   }
   for (const box of entry.boxes ?? []) {
     const r = parseBox(box);
@@ -80,17 +93,23 @@ function ringsFromEntry(entry: { polygons?: string[]; boxes?: string[] }): LonLa
   return rings;
 }
 
-async function fetchMission(mission: (typeof MISSIONS)[number], fromIso: string, toIso: string) {
+async function fetchMissionPage(
+  mission: (typeof MISSIONS)[number],
+  fromIso: string,
+  toIso: string,
+  pageNum: number,
+) {
   const u = new URL(CMR);
   u.searchParams.set('short_name', mission.shortName);
   u.searchParams.set('page_size', String(MAX_PAGE));
+  u.searchParams.set('page_num', String(pageNum));
   u.searchParams.set('sort_key', '-start_date');
   u.searchParams.set('temporal', `${fromIso},${toIso}`);
 
   const res = await fetch(u.toString(), {
     headers: { 'User-Agent': 'satellite-tracker-worker/0.1' },
   });
-  if (!res.ok) throw new Error(`cmr ${mission.shortName} ${res.status}`);
+  if (!res.ok) throw new Error(`cmr ${mission.shortName} p${pageNum} ${res.status}`);
   const json: unknown = await res.json();
   return feedSchema.parse(json);
 }
@@ -104,21 +123,28 @@ export async function runCmrIngest(ctx: JobContext): Promise<{
   let rowsUpserted = 0;
   let errors = 0;
   const end = new Date();
-  const start = new Date(end.getTime() - 72 * 60 * 60 * 1000);
+  // 7 days back so the 7d / 30d UI views have meaningful history to aggregate.
+  // (CMR still caps our page at 200 per short_name per run; we dedupe on id.)
+  const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
   const fromIso = start.toISOString();
   const toIso = end.toISOString();
 
   for (const m of MISSIONS) {
-    let parsed: z.infer<typeof feedSchema>;
-    try {
-      parsed = await fetchMission(m, fromIso, toIso);
-    } catch (e) {
-      ctx.log.warn('cmrIngest fetch', m.shortName, e);
-      errors++;
-      continue;
+    const entries: NonNullable<NonNullable<z.infer<typeof feedSchema>['feed']>['entry']> = [];
+    for (let page = 1; page <= MAX_PAGES_PER_MISSION; page++) {
+      try {
+        const parsed = await fetchMissionPage(m, fromIso, toIso, page);
+        const pageEntries = parsed.feed?.entry ?? [];
+        entries.push(...pageEntries);
+        // CMR returns fewer than page_size when there are no more entries.
+        if (pageEntries.length < MAX_PAGE) break;
+      } catch (e) {
+        ctx.log.warn('cmrIngest fetch', m.shortName, 'page', page, e);
+        errors++;
+        break;
+      }
     }
-
-    const entries = parsed.feed?.entry ?? [];
+    ctx.log.info('cmrIngest fetched', m.shortName, 'entries', entries.length);
     for (const entry of entries) {
       const granuleId = entry.id ?? entry.title;
       if (!granuleId) {

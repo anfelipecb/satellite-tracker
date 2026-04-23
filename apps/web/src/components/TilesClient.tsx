@@ -1,11 +1,11 @@
 'use client';
 
 import { useUser } from '@clerk/nextjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { latLngToCell } from 'h3-js';
 import { useSupabaseBrowser } from '@/lib/supabase/browser';
 import { propagatePositionDeg, type TleRow } from '@/lib/sgp4';
-import { TilesMap } from '@/components/TilesMap';
+import { TilesSchematicMap } from '@/components/TilesSchematicMap';
 
 const MISSIONS = [
   { value: 'MOD09GA', label: 'MODIS Terra (MOD09GA)' },
@@ -14,19 +14,34 @@ const MISSIONS = [
   { value: 'S2A_MSIL2A', label: 'Sentinel-2A (L2A)' },
 ] as const;
 
+const RANGES = [
+  { hours: 24, label: '24h' },
+  { hours: 24 * 7, label: '7d' },
+  { hours: 24 * 30, label: '30d' },
+] as const;
+
 const H3_RES = 4;
 
 export function TilesClient() {
   const { user, isLoaded } = useUser();
   const supabase = useSupabaseBrowser();
   const [mission, setMission] = useState<string>('MOD09GA');
-  const [hours, setHours] = useState(24);
+  const [hours, setHours] = useState<number>(24);
   const [cells, setCells] = useState<{ h3_index: string; count: number }[]>([]);
   const [predicted, setPredicted] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [selectedH3, setSelectedH3] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
 
   const maxCount = useMemo(() => cells.reduce((m, c) => Math.max(m, c.count), 0), [cells]);
+
+  const rangeLabel = useMemo(() => {
+    const match = RANGES.find((r) => r.hours === hours);
+    if (match) return match.label;
+    if (hours >= 24) return `${Math.round(hours / 24)}d`;
+    return `${hours}h`;
+  }, [hours]);
 
   const loadAggregate = useCallback(async () => {
     setLoading(true);
@@ -39,6 +54,7 @@ export function TilesClient() {
       }
       const j = (await res.json()) as { cells: { h3_index: string; count: number }[] };
       setCells(j.cells ?? []);
+      setUpdatedAt(new Date().toISOString());
     } catch (e) {
       setMsg(e instanceof Error ? e.message : 'Failed to load tiles');
     } finally {
@@ -97,26 +113,48 @@ export function TilesClient() {
     void loadPredicted();
   }, [isLoaded, loadAggregate, loadPredicted, user]);
 
+  // Debounce realtime refreshes so large CMR backfills don't spawn a fetch
+  // per INSERT row (which exhausts browser connection pools).
+  const refreshTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!user) return;
+    const scheduleRefresh = () => {
+      if (refreshTimerRef.current != null) return;
+      refreshTimerRef.current = window.setTimeout(() => {
+        refreshTimerRef.current = null;
+        void loadAggregate();
+      }, 4_000);
+    };
     const channel = supabase
       .channel('tiles-live')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'granule_tiles' }, () => void loadAggregate())
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'granules' }, () => void loadAggregate())
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'granule_tiles' }, scheduleRefresh)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'granules' }, scheduleRefresh)
       .subscribe();
     return () => {
+      if (refreshTimerRef.current != null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
       void supabase.removeChannel(channel);
     };
   }, [loadAggregate, supabase, user]);
 
   const top10 = useMemo(() => cells.slice(0, 10), [cells]);
+  const totalObs = useMemo(() => cells.reduce((s, c) => s + c.count, 0), [cells]);
+  const uniqueCells = cells.length;
+
+  useEffect(() => {
+    if (!selectedH3) return;
+    if (!cells.some((c) => c.h3_index === selectedH3)) setSelectedH3(null);
+  }, [cells, selectedH3]);
 
   return (
     <div className="space-y-6">
       <p className="text-sm text-slate-400">
-        NASA CMR granules (via the worker) are hashed to H3 (res 4) and stored in <code className="text-aurora">granule_tiles</code>.
-        Cyan: where data has been seen recently. Rose: predicted ground footprint for your tracked satellites (client SGP4, next ~90m).
-        Live updates on insert.
+        Schematic 2D availability board — NASA CMR granules from the worker are hashed to H3 (res 4) in{' '}
+        <code className="text-aurora">granule_tiles</code> and rendered on an equirectangular world map. Cyan cells:
+        data availability in the selected window. Rose: predicted sub-satellite H3 for your tracked satellites. Live
+        updates on insert; pick 24h / 7d / 30d to see recent or monthly coverage.
       </p>
 
       <div className="flex flex-wrap items-end gap-3">
@@ -134,17 +172,36 @@ export function TilesClient() {
             ))}
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-xs text-slate-500">
-          Window (h)
-          <input
-            type="number"
-            min={1}
-            max={168}
-            value={hours}
-            onChange={(e) => setHours(Number(e.target.value) || 24)}
-            className="w-24 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
-          />
-        </label>
+
+        <div className="flex flex-col gap-1 text-xs text-slate-500">
+          Range
+          <div className="inline-flex overflow-hidden rounded-xl border border-white/10 bg-black/30">
+            {RANGES.map((r) => (
+              <button
+                key={r.hours}
+                type="button"
+                onClick={() => setHours(r.hours)}
+                className={`px-3 py-2 text-sm transition ${
+                  hours === r.hours
+                    ? 'bg-cyan-500/25 text-white shadow-[inset_0_0_0_1px_rgba(34,211,238,0.5)]'
+                    : 'text-slate-300 hover:bg-white/5'
+                }`}
+              >
+                {r.label}
+              </button>
+            ))}
+            <input
+              type="number"
+              min={1}
+              max={720}
+              value={hours}
+              onChange={(e) => setHours(Math.max(1, Math.min(720, Number(e.target.value) || 24)))}
+              className="w-20 border-l border-white/10 bg-transparent px-2 py-2 text-sm text-white outline-none"
+              aria-label="Custom window in hours"
+            />
+          </div>
+        </div>
+
         <button
           type="button"
           onClick={() => void loadAggregate()}
@@ -164,7 +221,28 @@ export function TilesClient() {
 
       {msg ? <p className="text-sm text-amber-200">{msg}</p> : null}
 
-      <TilesMap cmrCells={cells} predictedH3={predicted} maxCount={maxCount} />
+      <div className="grid gap-3 sm:grid-cols-4">
+        <StatTile label="H3 cells covered" value={uniqueCells.toLocaleString()} accent="cyan" />
+        <StatTile label="Total observations" value={totalObs.toLocaleString()} accent="cyan" />
+        <StatTile label="Peak per-cell" value={maxCount ? maxCount.toLocaleString() : '—'} accent="amber" />
+        <StatTile
+          label="Predicted sub-sat cells"
+          value={predicted.length.toLocaleString()}
+          accent="rose"
+        />
+      </div>
+
+      <TilesSchematicMap
+        cmrCells={cells}
+        predictedH3={predicted}
+        maxCount={maxCount}
+        mission={mission}
+        hours={hours}
+        rangeLabel={rangeLabel}
+        updatedAt={updatedAt}
+        selectedH3={selectedH3}
+        onSelectH3={setSelectedH3}
+      />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -172,11 +250,19 @@ export function TilesClient() {
           <ol className="mt-2 space-y-1 text-sm text-slate-200">
             {top10.length ? (
               top10.map((c, i) => (
-                <li key={c.h3_index} className="flex justify-between gap-2">
-                  <span className="text-slate-500">
-                    {i + 1}. {c.h3_index.slice(0, 12)}…
-                  </span>
-                  <span>{c.count}</span>
+                <li key={c.h3_index}>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedH3(c.h3_index === selectedH3 ? null : c.h3_index)}
+                    className={`flex w-full justify-between gap-2 rounded-lg px-2 py-1 text-left transition hover:bg-white/5 ${
+                      selectedH3 === c.h3_index ? 'bg-cyan-500/15 ring-1 ring-cyan-400/40' : ''
+                    }`}
+                  >
+                    <span className="text-slate-500">
+                      {i + 1}. {c.h3_index.slice(0, 12)}…
+                    </span>
+                    <span className="tabular-nums text-slate-200">{c.count}</span>
+                  </button>
                 </li>
               ))
             ) : (
@@ -187,11 +273,36 @@ export function TilesClient() {
         <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
           <h2 className="text-sm font-medium text-slate-300">Legend</h2>
           <ul className="mt-2 list-inside list-disc text-sm text-slate-400">
-            <li>Cyan fill: NASA CMR data availability (H3, denser = more matching granules in window)</li>
-            <li>Rose: client-side predicted sub-satellite track (H3 res 4) for tracked sats</li>
+            <li>Muted continents: static Natural Earth 110m world basemap (equirectangular)</li>
+            <li>Cyan fill: NASA CMR data availability (H3 res-4, denser = more matching granules in window)</li>
+            <li>Rose: client-side predicted sub-satellite track (H3 res-4) for tracked sats</li>
+            <li>Yellow dashed: equator · gridlines every 30° · hover for cell & cursor coordinates</li>
           </ul>
         </div>
       </div>
+    </div>
+  );
+}
+
+function StatTile({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string;
+  accent: 'cyan' | 'amber' | 'rose';
+}) {
+  const accentClass =
+    accent === 'cyan'
+      ? 'border-cyan-400/25 bg-cyan-500/5 text-cyan-200'
+      : accent === 'amber'
+        ? 'border-amber-400/25 bg-amber-500/5 text-amber-200'
+        : 'border-rose-400/25 bg-rose-500/5 text-rose-200';
+  return (
+    <div className={`rounded-2xl border px-4 py-3 shadow-inner ${accentClass}`}>
+      <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">{label}</p>
+      <p className="mt-1 text-2xl font-semibold tabular-nums text-white">{value}</p>
     </div>
   );
 }
