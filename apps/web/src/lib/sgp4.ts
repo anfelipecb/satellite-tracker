@@ -68,3 +68,19 @@ export function buildOrbitTrack(
 
   return samples;
 }
+
+/** Samples from (end - minutesBack) to end, oldest-first (for polylines). */
+export function buildOrbitTrackBackward(
+  row: TleRow,
+  end: Date,
+  minutesBack = 90,
+  stepSeconds = 120
+): { lat: number; lon: number; altKm: number }[] {
+  const samples: { lat: number; lon: number; altKm: number }[] = [];
+  const totalSeconds = minutesBack * 60;
+  for (let offset = 0; offset <= totalSeconds; offset += stepSeconds) {
+    const sample = propagatePositionDeg(row, new Date(end.getTime() - offset * 1000));
+    if (sample) samples.push(sample);
+  }
+  return samples.reverse();
+}

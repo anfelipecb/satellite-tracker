@@ -2,6 +2,7 @@
 
 import { useUser } from '@clerk/nextjs';
 import { useCallback, useEffect, useState } from 'react';
+import { CityLookupForm, type GeocodeResult } from '@/components/CityLookupForm';
 import { useSupabaseBrowser } from '@/lib/supabase/browser';
 
 const MAX_LOCATIONS = 10;
@@ -18,6 +19,7 @@ export default function LocationsPage() {
   const [lat, setLat] = useState('41.8781');
   const [lon, setLon] = useState('-87.6298');
   const [msg, setMsg] = useState<string | null>(null);
+  const [showManual, setShowManual] = useState(false);
 
   const refresh = useCallback(async () => {
     const { data, error } = await supabase
@@ -61,6 +63,33 @@ export default function LocationsPage() {
     }
   }
 
+  async function onCityPicked(r: GeocodeResult) {
+    setMsg(null);
+    if (!user?.id) {
+      setMsg('Not signed in');
+      return;
+    }
+    if (rows.length >= MAX_LOCATIONS) {
+      setMsg(`Maximum ${MAX_LOCATIONS} locations (demo soft limit).`);
+      return;
+    }
+    const label = [r.name, r.country].filter(Boolean).join(', ');
+    const { error } = await supabase.from('user_locations').insert({
+      user_id: user.id,
+      name: label,
+      lat: r.lat,
+      lon: r.lon,
+      radius_km: 0,
+      last_viewed_at: new Date().toISOString(),
+    });
+    if (error) setMsg(error.message);
+    else {
+      setLat(String(r.lat));
+      setLon(String(r.lon));
+      await refresh();
+    }
+  }
+
   async function remove(id: string) {
     const { error } = await supabase.from('user_locations').delete().eq('id', id);
     if (error) setMsg(error.message);
@@ -81,46 +110,61 @@ export default function LocationsPage() {
           days.
         </p>
       </div>
-      <form onSubmit={onSubmit} className="space-y-4 rounded-xl border border-white/10 bg-white/5 p-4">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Label
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
-              required
-            />
-          </label>
-          <div />
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Latitude
-            <input
-              value={lat}
-              onChange={(e) => setLat(e.target.value)}
-              className="rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
-              required
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Longitude
-            <input
-              value={lon}
-              onChange={(e) => setLon(e.target.value)}
-              className="rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
-              required
-            />
-          </label>
-        </div>
+      <div className="space-y-4 rounded-xl border border-white/10 bg-white/5 p-4">
+        <CityLookupForm
+          onPicked={(r) => void onCityPicked(r)}
+          onStatus={setMsg}
+        />
         <button
-          type="submit"
-          className="rounded-full bg-aurora px-4 py-2 text-sm font-medium text-void"
-          disabled={!isLoaded || !user}
+          type="button"
+          onClick={() => setShowManual((s) => !s)}
+          className="text-xs text-aurora/90 underline-offset-2 hover:underline"
         >
-          Save location
+          {showManual ? 'Hide' : 'Add'} manual coordinates
         </button>
+        {showManual ? (
+          <form onSubmit={onSubmit} className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Label
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+                  required
+                />
+              </label>
+              <div />
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Latitude
+                <input
+                  value={lat}
+                  onChange={(e) => setLat(e.target.value)}
+                  className="rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+                  required
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Longitude
+                <input
+                  value={lon}
+                  onChange={(e) => setLon(e.target.value)}
+                  className="rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+                  required
+                />
+              </label>
+            </div>
+            <button
+              type="submit"
+              className="rounded-full bg-aurora px-4 py-2 text-sm font-medium text-void"
+              disabled={!isLoaded || !user}
+            >
+              Save location
+            </button>
+          </form>
+        ) : null}
         {msg ? <p className="text-sm text-rose-400">{msg}</p> : null}
-      </form>
+      </div>
       <ul className="space-y-2">
         {rows.map((r) => (
           <li

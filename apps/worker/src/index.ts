@@ -41,6 +41,6 @@ new Cron('* * * * *', () => void safe('overheadCounts', () => runOverheadCounts(
 new Cron('*/2 * * * *', () => void safe('abovePoller', () => runAbovePoller(ctx)));
 new Cron('*/15 * * * *', () => void safe('swxPoller', () => runSwxPoller(ctx)));
 new Cron('5 * * * *', () => void safe('launchesPoller', () => runLaunchesPoller(ctx)));
-new Cron('10 * * * *', () => void safe('cmrIngest', () => runCmrIngest(ctx)));
+new Cron('*/15 * * * *', () => void safe('cmrIngest', () => runCmrIngest(ctx)));
 
 log.info('scheduler registered');

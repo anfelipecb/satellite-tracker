@@ -38,6 +38,9 @@ supabase/.temp
 # Cesium
 apps/web/public/cesium
 
+# Playwright MCP (local artifacts)
+.playwright-mcp/
+
 # Test
 coverage
 .vercel

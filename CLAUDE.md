@@ -22,7 +22,7 @@ Users authenticate with **Clerk**. The web app requests a Clerk JWT for Supabase
 - The worker **never** writes per-second satellite positions.
 - **TLEs** live in `tles`; the browser runs **SGP4** (`satellite.js`) for the globe and Starlink counts.
 - **N2YO** is used for: `/positions` (live path, server-side proxy in Next), `/visualpasses`, `/above` (worker snapshot).
-- **Supabase Realtime** (publication `supabase_realtime`) includes worker-written tables such as `tles`, `satellites`, `overhead_counts`, `launches`, `space_weather`, and user tables as in migrations. The dashboard subscribes to `space_weather`, `launches`, and `overhead_counts` updates.
+- **Supabase Realtime** (publication `supabase_realtime`) includes worker-written tables such as `tles`, `satellites`, `overhead_counts`, `launches`, `space_weather`, and user tables as in migrations. The dashboard subscribes to `space_weather`, `launches`, and `overhead_counts` updates. `user_ui_state` syncs active **location** + **NORAD** focus between Mission Control, Globe Lab, and clients via Realtime.
 
 ## Database (Clerk)
 
@@ -44,10 +44,11 @@ Users authenticate with **Clerk**. The web app requests a Clerk JWT for Supabase
 | NOAA SWPC `planetary_k_index_1m.json` | Kp index |
 | Launch Library 2 `/launch/upcoming` | Upcoming launches |
 
-## Stretch (tiles)
+## Tiles (NASA CMR + H3)
 
-- `apps/web/src/app/app/tiles/page.tsx` — placeholder.
-- Worker `runCmrIngest` — stub; add NASA CMR + `h3-js` later.
+- **Worker** `runCmrIngest` fetches CMR `granules.json` for `MOD09GA`, `MYD09GA`, `LANDSAT_OT_C2_L2`, `S2A_MSIL2A` (last 72h), upserts `granules` + `granule_tiles` (H3 res **4** via `h3-js`). Scheduled **`*/15 * * * *`** (every 15 minutes).
+- **Web** `/app/tiles`: `TilesClient` + Cesium **2D** map (`TilesMap`); `GET /api/tiles/aggregate?mission=…&hours=…` (Clerk) aggregates H3 counts; client overlays **predicted** pass cells (`latLngToCell` on SGP4 ground track) in rose; CMR cells in cyan. Realtime on `granules` / `granule_tiles` refreshes the view.
+- **Geocoding** `GET /api/geocode` — Open-Meteo Geocoding (no key); used by `CityLookupForm` on Mission Control and **Locations**.
 
 ## Pitfalls
 
@@ -63,4 +64,4 @@ pnpm install
 pnpm exec turbo run build test lint
 ```
 
-Apply SQL in order: `0001_init.sql` then `0002_*` (Realtime + RLS `TO authenticated`), via `supabase db push`, SQL editor, or Supabase MCP **`apply_migration`** (keep repo files and remote in sync).
+Apply SQL in order: `0001_init.sql` then `0002_*` then `0003_user_ui_state.sql` (Realtime + RLS `TO authenticated` + `user_ui_state`), via `supabase db push`, SQL editor, or Supabase MCP **`apply_migration`** (keep repo files and remote in sync).

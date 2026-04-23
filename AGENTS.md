@@ -24,6 +24,8 @@ Do **not** edit the other agent’s primary tree without coordination.
 - Add `User-Agent: satellite-tracker-worker/0.1` on outbound HTTP if a provider requires it.
 - **Env**: `dotenv` loads `apps/worker/.env` at process start (`src/index.ts`). **Railway** injects variables; a `.env` file is not used there. Copy from `apps/worker/.env.example`.
 - **`N2YO_API_KEY`**: empty or unset maps to an internal placeholder so the process boots; set a real key from n2yo.com for `abovePoller` and any N2YO-backed job to succeed.
+- **`overheadCounts`**: only **recently viewed** `user_locations` (last 7 days), ordered by `last_viewed_at` **desc**, capped at **50** locations per run so a single Railway instance stays predictable.
+- **`cmrIngest`**: NASA CMR `granules.json` for MODIS/Landsat/Sentinel short-names; upserts `granules` + `granule_tiles` with **h3-js** `polygonToCells` (res 4). Runs every **15** minutes. Use **`User-Agent: satellite-tracker-worker/0.1`** (already in job fetch).
 
 ## Supabase MCP
 

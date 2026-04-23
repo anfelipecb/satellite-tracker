@@ -1,12 +1,23 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 
-export type GlobePoint = { id: number; lat: number; lon: number; altKm: number };
+export type GlobePointKind = 'background' | 'favorite' | 'focus';
+
+export type GlobePoint = {
+  id: number;
+  name?: string;
+  lat: number;
+  lon: number;
+  altKm: number;
+  kind?: GlobePointKind;
+};
+
 export type LivePathPoint = { lat: number; lon: number; altKm: number };
 
 export type OrbitTrack = {
   id: string;
+  noradId?: number;
   positions: LivePathPoint[];
   color?: string;
   width?: number;
@@ -19,12 +30,21 @@ export type ObserverPoint = {
   lon: number;
 };
 
+export type GlobeSceneHandle = {
+  focusOnSatellite: (noradId: number) => void;
+  resetView: () => void;
+};
+
 type Props = {
   points: GlobePoint[];
   tracks?: OrbitTrack[];
   livePath?: LivePathPoint[] | null;
-  focus?: { lat: number; lon: number; altKm: number } | null;
   observer?: ObserverPoint | null;
+  /** When true, show NORAD labels on background points (default false). */
+  showLabels?: boolean;
+  onPointClick?: (noradId: number) => void;
+  /** 2D mode for tiles view */
+  sceneMode2D?: boolean;
 };
 
 type CesiumGlobal = {
@@ -38,14 +58,21 @@ type CesiumGlobal = {
   Color: {
     CYAN: { withAlpha: (value: number) => unknown };
     HOTPINK: unknown;
-    ORANGE: unknown;
+    ORANGE: { withAlpha: (value: number) => unknown };
     WHITE: unknown;
     BLACK: { withAlpha: (value: number) => unknown };
     fromCssColorString: (value: string) => { withAlpha: (alpha: number) => unknown };
   };
-  Ion: {
-    defaultAccessToken?: string;
-  };
+  Ion: { defaultAccessToken?: string };
+  ScreenSpaceEventHandler: new (element: HTMLCanvasElement) => CesiumHandler;
+  ScreenSpaceEventType: { LEFT_CLICK: number };
+  defined: (value: unknown) => boolean;
+  SceneMode: { SCENE2D: number; SCENE3D: number };
+};
+
+type CesiumHandler = {
+  setInputAction: (cb: (click: { position: unknown }) => void, type: number) => void;
+  destroy: () => void;
 };
 
 type CesiumViewer = {
@@ -59,6 +86,11 @@ type CesiumViewer = {
   };
   camera: {
     flyTo: (options: Record<string, unknown>) => void;
+  };
+  scene: {
+    mode: number;
+    canvas: HTMLCanvasElement;
+    pick: (pos: unknown) => { id?: { id: string } } | undefined;
   };
   destroy: () => void;
 };
@@ -139,15 +171,55 @@ function toDegreesArrayHeights(path: LivePathPoint[]) {
   return path.flatMap((point) => [point.lon, point.lat, point.altKm * 1000]);
 }
 
-export default function GlobeScene({ points, tracks, livePath, focus, observer }: Props) {
+const BILLBOARD_URI = '/icons/satellite.svg';
+
+const GlobeScene = forwardRef<GlobeSceneHandle, Props>(function GlobeScene(
+  { points, tracks, livePath, observer, showLabels = false, onPointClick, sceneMode2D = false },
+  ref
+) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<CesiumViewer | null>(null);
+  const pointsRef = useRef<GlobePoint[]>([]);
+  const handlerRef = useRef<CesiumHandler | null>(null);
+  const onPointClickRef = useRef<Props['onPointClick']>(onPointClick);
+  onPointClickRef.current = onPointClick;
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const sliced = useMemo(() => points.slice(0, 500), [points]);
+  useEffect(() => {
+    pointsRef.current = sliced;
+  }, [sliced]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      focusOnSatellite: (noradId: number) => {
+        const viewer = viewerRef.current;
+        const Cesium = window.Cesium;
+        if (!viewer || !Cesium) return;
+        const p = pointsRef.current.find((x) => x.id === noradId);
+        if (!p) return;
+        viewer.camera.flyTo({
+          destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, Math.max(p.altKm * 2500, 1_500_000)),
+          duration: 1.2,
+        });
+      },
+      resetView: () => {
+        const viewer = viewerRef.current;
+        const Cesium = window.Cesium;
+        if (!viewer || !Cesium) return;
+        viewer.camera.flyTo({
+          destination: Cesium.Cartesian3.fromDegrees(-90, 25, 18_000_000),
+          duration: 1.2,
+        });
+      },
+    }),
+    []
+  );
 
   useEffect(() => {
     let disposed = false;
+    const scene2d = sceneMode2D;
 
     void ensureCesium()
       .then((Cesium) => {
@@ -162,12 +234,16 @@ export default function GlobeScene({ points, tracks, livePath, focus, observer }
           baseLayerPicker: false,
           geocoder: false,
           homeButton: false,
-          sceneModePicker: false,
+          sceneModePicker: !scene2d,
           navigationHelpButton: false,
           infoBox: false,
           selectionIndicator: false,
           fullscreenButton: false,
         });
+
+        if (scene2d && Cesium.SceneMode) {
+          viewer.scene.mode = Cesium.SceneMode.SCENE2D;
+        }
 
         viewer.imageryLayers.removeAll();
         viewer.imageryLayers.addImageryProvider(
@@ -178,6 +254,25 @@ export default function GlobeScene({ points, tracks, livePath, focus, observer }
         );
 
         viewerRef.current = viewer;
+
+        const h = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+        handlerRef.current = h;
+        h.setInputAction(
+          (click: { position: unknown }) => {
+            const fn = onPointClickRef.current;
+            if (!fn) return;
+            const picked = viewer.scene.pick(click.position) as { id?: { id?: string } } | undefined;
+            if (!Cesium.defined(picked) || !picked) return;
+            const ent = (picked as { id?: { id?: string } }).id;
+            const rawId = ent && typeof ent === 'object' && 'id' in ent && typeof ent.id === 'string' ? ent.id : undefined;
+            const sid = rawId && rawId.startsWith('sat-') ? rawId.slice(4) : null;
+            if (sid) {
+              const n = Number(sid);
+              if (!Number.isNaN(n)) fn(n);
+            }
+          },
+          Cesium.ScreenSpaceEventType.LEFT_CLICK
+        );
       })
       .catch((error) => {
         setLoadError(error instanceof Error ? error.message : 'Failed to load Cesium.');
@@ -185,10 +280,12 @@ export default function GlobeScene({ points, tracks, livePath, focus, observer }
 
     return () => {
       disposed = true;
+      handlerRef.current?.destroy();
+      handlerRef.current = null;
       viewerRef.current?.destroy();
       viewerRef.current = null;
     };
-  }, []);
+  }, [sceneMode2D]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -198,21 +295,42 @@ export default function GlobeScene({ points, tracks, livePath, focus, observer }
     viewer.entities.removeAll();
 
     for (const point of sliced) {
+      const kind = point.kind ?? 'background';
+      const isFavorite = kind === 'favorite' || kind === 'focus';
+      const scale = isFavorite ? 0.5 : 0.28;
+      const tint = isFavorite
+        ? Cesium.Color.ORANGE.withAlpha(0.95)
+        : Cesium.Color.CYAN.withAlpha(0.88);
+      const showLabel = isFavorite && (point.name || showLabels);
       viewer.entities.add({
         id: `sat-${point.id}`,
-        name: `NORAD ${point.id}`,
+        name: point.name ? `${point.name}` : `NORAD ${point.id}`,
         position: Cesium.Cartesian3.fromDegrees(point.lon, point.lat, point.altKm * 1000),
-        point: {
-          pixelSize: 4,
-          color: Cesium.Color.CYAN.withAlpha(0.75),
+        billboard: {
+          image: BILLBOARD_URI,
+          scale,
+          color: tint,
+          heightReference: 0, // none
         },
+        label: showLabel
+          ? {
+              text: point.name ?? `NORAD ${point.id}`,
+              font: '12px system-ui, sans-serif',
+              fillColor: Cesium.Color.WHITE,
+              showBackground: true,
+              backgroundColor: Cesium.Color.BLACK.withAlpha(0.7),
+              pixelOffset: new Cesium.Cartesian2(0, -32),
+              scale: 0.6,
+            }
+          : { show: false },
       });
     }
 
     for (const track of tracks ?? []) {
       if (track.positions.length < 2) continue;
+      const safeId = String(track.noradId ?? track.id).replace(/[^a-zA-Z0-9_-]/g, '_');
       viewer.entities.add({
-        id: `track-${track.id}`,
+        id: `track-${safeId}`,
         name: track.id,
         polyline: {
           positions: Cesium.Cartesian3.fromDegreesArrayHeights(toDegreesArrayHeights(track.positions)),
@@ -230,18 +348,6 @@ export default function GlobeScene({ points, tracks, livePath, focus, observer }
           positions: Cesium.Cartesian3.fromDegreesArrayHeights(toDegreesArrayHeights(livePath)),
           width: 2,
           material: Cesium.Color.HOTPINK,
-        },
-      });
-    }
-
-    if (focus) {
-      viewer.entities.add({
-        id: 'focus-satellite',
-        name: 'Focus',
-        position: Cesium.Cartesian3.fromDegrees(focus.lon, focus.lat, focus.altKm * 1000),
-        point: {
-          pixelSize: 12,
-          color: Cesium.Color.ORANGE,
         },
       });
     }
@@ -265,18 +371,7 @@ export default function GlobeScene({ points, tracks, livePath, focus, observer }
         },
       });
     }
-  }, [focus, livePath, observer, sliced, tracks]);
-
-  useEffect(() => {
-    const viewer = viewerRef.current;
-    const Cesium = window.Cesium;
-    if (!viewer || !Cesium || !focus) return;
-
-    viewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(focus.lon, focus.lat, Math.max(focus.altKm * 2500, 1_500_000)),
-      duration: 1.4,
-    });
-  }, [focus]);
+  }, [livePath, observer, showLabels, sliced, tracks]);
 
   return (
     <div className="relative h-[72vh] w-full overflow-hidden rounded-xl border border-white/10 bg-black">
@@ -288,4 +383,6 @@ export default function GlobeScene({ points, tracks, livePath, focus, observer }
       ) : null}
     </div>
   );
-}
+});
+
+export default GlobeScene;

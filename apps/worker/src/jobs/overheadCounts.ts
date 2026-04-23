@@ -87,11 +87,18 @@ export async function runOverheadCounts(ctx: JobContext): Promise<{
     return { durationMs: Date.now() - started, rowsUpserted: 0, errors: 0 };
   }
 
-  const activeLocs = locs.filter((l) => {
-    if (!l.last_viewed_at) return true;
-    const t = new Date(l.last_viewed_at).getTime();
-    return Date.now() - t < 7 * 86400000;
-  });
+  const activeLocs = locs
+    .filter((l) => {
+      if (!l.last_viewed_at) return true;
+      const t = new Date(l.last_viewed_at).getTime();
+      return Date.now() - t < 7 * 86400000;
+    })
+    .sort((a, b) => {
+      const ta = a.last_viewed_at ? new Date(a.last_viewed_at).getTime() : 0;
+      const tb = b.last_viewed_at ? new Date(b.last_viewed_at).getTime() : 0;
+      return tb - ta;
+    })
+    .slice(0, 50);
   if (!activeLocs.length) {
     ctx.log.info('overheadCounts: no recently viewed locations');
     return { durationMs: Date.now() - started, rowsUpserted: 0, errors: 0 };

@@ -2,15 +2,20 @@
 
 import dynamic from 'next/dynamic';
 import { useUser } from '@clerk/nextjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSupabaseBrowser } from '@/lib/supabase/browser';
+import { useActiveSelection } from '@/lib/hooks/useActiveSelection';
+import { AnimatedNumber } from '@/components/AnimatedNumber';
+import { CityLookupForm, type GeocodeResult } from '@/components/CityLookupForm';
+import { LaunchCountdown } from '@/components/LaunchCountdown';
+import { DEFAULT_INTERESTING_NORAD } from '@/lib/defaultSatellites';
 import {
   buildOrbitTrack,
   elevationDegForObserver,
   propagatePositionDeg,
   type TleRow,
 } from '@/lib/sgp4';
-import type { GlobePoint, LivePathPoint, ObserverPoint, OrbitTrack } from '@/components/GlobeScene';
+import type { GlobePoint, GlobeSceneHandle, LivePathPoint, ObserverPoint, OrbitTrack } from '@/components/GlobeScene';
 import type {
   N2yoAboveResponse,
   N2yoPositionsResponse,
@@ -90,14 +95,21 @@ function pickLatestTleRows(
 export function DashboardClient() {
   const { user, isLoaded } = useUser();
   const supabase = useSupabaseBrowser();
+  const {
+    ready: selectionReady,
+    activeLocationId,
+    setActiveLocationId,
+    activeNoradId,
+    setActiveNoradId,
+    reconcileLocationIds,
+    reconcileNoradIds,
+  } = useActiveSelection(user?.id);
 
   const [now, setNow] = useState(() => new Date());
   const [kp, setKp] = useState<number | null>(null);
   const [launches, setLaunches] = useState<LaunchRow[]>([]);
   const [locations, setLocations] = useState<LocationRow[]>([]);
   const [favorites, setFavorites] = useState<FavoriteSatellite[]>([]);
-  const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
-  const [selectedSatelliteId, setSelectedSatelliteId] = useState<number | null>(null);
   const [workerCounts, setWorkerCounts] = useState<WorkerCounts>({
     sgp4: null,
     n2yo: null,
@@ -108,23 +120,27 @@ export function DashboardClient() {
   const [livePath, setLivePath] = useState<LivePathPoint[] | null>(null);
   const [backgroundRows, setBackgroundRows] = useState<TleRow[]>([]);
   const [favoriteRows, setFavoriteRows] = useState<TleRow[]>([]);
+  const [orbitTleRows, setOrbitTleRows] = useState<TleRow[]>([]);
+  const [orbitNames, setOrbitNames] = useState<Record<number, string>>({});
+  const globeRef = useRef<GlobeSceneHandle | null>(null);
   const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState<FavoriteSatellite[]>([]);
   const [locationName, setLocationName] = useState('Home');
   const [locationLat, setLocationLat] = useState('41.8781');
   const [locationLon, setLocationLon] = useState('-87.6298');
+  const [showManualCoords, setShowManualCoords] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [loadingSearch, setLoadingSearch] = useState(false);
   const [loadingPath, setLoadingPath] = useState(false);
   const [loadingAbove, setLoadingAbove] = useState(false);
 
   const selectedLocation = useMemo(
-    () => locations.find((row) => row.id === selectedLocationId) ?? locations[0] ?? null,
-    [locations, selectedLocationId]
+    () => locations.find((row) => row.id === activeLocationId) ?? locations[0] ?? null,
+    [locations, activeLocationId]
   );
   const selectedSatellite = useMemo(
-    () => favorites.find((row) => row.norad_id === selectedSatelliteId) ?? favorites[0] ?? null,
-    [favorites, selectedSatelliteId]
+    () => favorites.find((row) => row.norad_id === activeNoradId) ?? favorites[0] ?? null,
+    [favorites, activeNoradId]
   );
 
   const refreshOverview = useCallback(async () => {
@@ -133,7 +149,7 @@ export function DashboardClient() {
     const [{ data: sw }, { data: launchRows }, { data: locationRows, error: locationError }, { data: favoriteIds }] =
       await Promise.all([
         supabase.from('space_weather').select('kp').order('ts', { ascending: false }).limit(1).maybeSingle(),
-        supabase.from('launches').select('id,name,net_utc,status,provider').order('net_utc', { ascending: true }).limit(6),
+        supabase.from('launches').select('id,name,net_utc,status,provider').order('net_utc', { ascending: true }).limit(3),
         supabase
           .from('user_locations')
           .select('id,name,lat,lon,last_viewed_at')
@@ -151,14 +167,12 @@ export function DashboardClient() {
 
     const nextLocations = (locationRows as LocationRow[] | null) ?? [];
     setLocations(nextLocations);
-    if (nextLocations.length && !nextLocations.some((row) => row.id === selectedLocationId)) {
-      setSelectedLocationId(nextLocations[0].id);
-    }
+    reconcileLocationIds(nextLocations.map((row) => row.id));
 
     const ids = (favoriteIds ?? []).map((row) => row.norad_id);
     if (!ids.length) {
       setFavorites([]);
-      setSelectedSatelliteId(null);
+      reconcileNoradIds([]);
       return;
     }
 
@@ -173,20 +187,19 @@ export function DashboardClient() {
       .map((row) => ({ norad_id: row.norad_id, name: row.name }));
 
     setFavorites(nextFavorites);
-    if (nextFavorites.length && !nextFavorites.some((row) => row.norad_id === selectedSatelliteId)) {
-      setSelectedSatelliteId(nextFavorites[0].norad_id);
-    }
-  }, [selectedLocationId, selectedSatelliteId, supabase, user?.id]);
+    reconcileNoradIds(nextFavorites.map((f) => f.norad_id));
+  }, [reconcileLocationIds, reconcileNoradIds, supabase, user?.id]);
 
   const refreshTleRows = useCallback(async () => {
     const favoriteIds = favorites.map((row) => row.norad_id);
+    const noradsForOrbits = favoriteIds.length > 0 ? favoriteIds : [...DEFAULT_INTERESTING_NORAD];
 
-    const [backgroundRes, favoriteRes] = await Promise.all([
+    const [backgroundRes, favoriteRes, orbitRes, satNames] = await Promise.all([
       supabase
         .from('tles')
         .select('norad_id,line1,line2,epoch')
         .order('epoch', { ascending: false })
-        .limit(3500),
+        .limit(4000),
       favoriteIds.length
         ? supabase
             .from('tles')
@@ -195,10 +208,21 @@ export function DashboardClient() {
             .order('epoch', { ascending: false })
             .limit(Math.max(favoriteIds.length * 12, 60))
         : Promise.resolve({ data: [], error: null }),
+      supabase
+        .from('tles')
+        .select('norad_id,line1,line2,epoch')
+        .in('norad_id', noradsForOrbits)
+        .order('epoch', { ascending: false })
+        .limit(Math.max(noradsForOrbits.length * 16, 80)),
+      supabase.from('satellites').select('norad_id,name').in('norad_id', noradsForOrbits),
     ]);
 
-    setBackgroundRows(pickLatestTleRows(backgroundRes.data, 280));
+    setBackgroundRows(pickLatestTleRows(backgroundRes.data, 200));
     setFavoriteRows(pickLatestTleRows(favoriteRes.data, 24));
+    setOrbitTleRows(pickLatestTleRows(orbitRes.data, Math.max(noradsForOrbits.length, 8)));
+    setOrbitNames(
+      Object.fromEntries((satNames.data as { norad_id: number; name: string }[] | null)?.map((r) => [r.norad_id, r.name]) ?? [])
+    );
   }, [favorites, supabase]);
 
   const refreshWorkerCounts = useCallback(async () => {
@@ -296,8 +320,9 @@ export function DashboardClient() {
 
   useEffect(() => {
     if (!isLoaded || !user) return;
+    if (!selectionReady) return;
     void refreshOverview();
-  }, [isLoaded, refreshOverview, user]);
+  }, [isLoaded, refreshOverview, user, selectionReady]);
 
   useEffect(() => {
     void refreshTleRows();
@@ -332,44 +357,62 @@ export function DashboardClient() {
     };
   }, [refreshOverview, refreshWorkerCounts, supabase, user]);
 
+  const onGlobePointClick = useCallback(
+    (noradId: number) => {
+      setActiveNoradId(noradId);
+    },
+    [setActiveNoradId]
+  );
+
   const backgroundPoints = useMemo<GlobePoint[]>(() => {
     const trackedIds = new Set(favoriteRows.map((row) => row.norad_id));
-    return backgroundRows
-      .filter((row) => !trackedIds.has(row.norad_id))
-      .map((row) => {
-        const point = propagatePositionDeg(row, now);
-        return point ? { id: row.norad_id, ...point } : null;
-      })
-      .filter((row): row is GlobePoint => Boolean(row));
+    const out: GlobePoint[] = [];
+    for (const row of backgroundRows) {
+      if (trackedIds.has(row.norad_id)) continue;
+      const p = propagatePositionDeg(row, now);
+      if (!p) continue;
+      out.push({ id: row.norad_id, kind: 'background', ...p });
+    }
+    return out;
   }, [backgroundRows, favoriteRows, now]);
 
   const favoritePoints = useMemo<GlobePoint[]>(() => {
-    return favoriteRows
-      .map((row) => {
-        const point = propagatePositionDeg(row, now);
-        return point ? { id: row.norad_id, ...point } : null;
-      })
-      .filter((row): row is GlobePoint => Boolean(row));
-  }, [favoriteRows, now]);
+    const out: GlobePoint[] = [];
+    for (const row of favoriteRows) {
+      const point = propagatePositionDeg(row, now);
+      const meta = favorites.find((entry) => entry.norad_id === row.norad_id);
+      if (!point) continue;
+      const isFocus = row.norad_id === selectedSatellite?.norad_id;
+      out.push({
+        id: row.norad_id,
+        name: meta?.name,
+        kind: isFocus ? 'focus' : 'favorite',
+        ...point,
+      });
+    }
+    return out;
+  }, [favoriteRows, favorites, now, selectedSatellite?.norad_id]);
 
   const focusPoint = useMemo(() => {
     if (!selectedSatellite) return null;
-    const row = favoriteRows.find((entry) => entry.norad_id === selectedSatellite.norad_id);
+    const row = favoriteRows.find((e) => e.norad_id === selectedSatellite.norad_id);
     return row ? propagatePositionDeg(row, now) : null;
   }, [favoriteRows, now, selectedSatellite]);
 
   const orbitTracks = useMemo<OrbitTrack[]>(() => {
-    return favoriteRows.map((row) => {
-      const favorite = favorites.find((entry) => entry.norad_id === row.norad_id);
+    return orbitTleRows.map((row) => {
+      const name =
+        orbitNames[row.norad_id] ?? favorites.find((f) => f.norad_id === row.norad_id)?.name ?? `NORAD ${row.norad_id}`;
       const isFocused = row.norad_id === selectedSatellite?.norad_id;
       return {
-        id: favorite?.name ?? `NORAD ${row.norad_id}`,
+        id: name,
+        noradId: row.norad_id,
         positions: buildOrbitTrack(row, now, isFocused ? 120 : 70, isFocused ? 90 : 150),
         color: isFocused ? '#fb7185' : '#22d3ee',
         width: isFocused ? 2.8 : 1.2,
       };
     });
-  }, [favoriteRows, favorites, now, selectedSatellite?.norad_id]);
+  }, [orbitTleRows, orbitNames, favorites, now, selectedSatellite?.norad_id]);
 
   const observerPoint = useMemo<ObserverPoint | null>(() => {
     if (!selectedLocation) return null;
@@ -413,14 +456,18 @@ export function DashboardClient() {
     event.preventDefault();
     if (!user?.id) return;
 
-    const { error } = await supabase.from('user_locations').insert({
-      user_id: user.id,
-      name: locationName,
-      lat: Number(locationLat),
-      lon: Number(locationLon),
-      radius_km: 0,
-      last_viewed_at: new Date().toISOString(),
-    });
+    const { data, error } = await supabase
+      .from('user_locations')
+      .insert({
+        user_id: user.id,
+        name: locationName,
+        lat: Number(locationLat),
+        lon: Number(locationLon),
+        radius_km: 0,
+        last_viewed_at: new Date().toISOString(),
+      })
+      .select('id')
+      .single();
 
     if (error) {
       setStatusMessage(error.message);
@@ -429,6 +476,35 @@ export function DashboardClient() {
 
     setStatusMessage(null);
     setLocationName('Home');
+    if (data?.id) setActiveLocationId(data.id);
+    await refreshOverview();
+  }
+
+  async function handleGeocodePicked(r: GeocodeResult) {
+    if (!user?.id) return;
+    const name = [r.name, r.country].filter(Boolean).join(', ');
+    const { data, error } = await supabase
+      .from('user_locations')
+      .insert({
+        user_id: user.id,
+        name,
+        lat: r.lat,
+        lon: r.lon,
+        radius_km: 0,
+        last_viewed_at: new Date().toISOString(),
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      setStatusMessage(error.message);
+      return;
+    }
+    setStatusMessage(null);
+    setLocationName('Home');
+    setLocationLat(String(r.lat));
+    setLocationLon(String(r.lon));
+    if (data?.id) setActiveLocationId(data.id);
     await refreshOverview();
   }
 
@@ -452,7 +528,7 @@ export function DashboardClient() {
       return;
     }
 
-    setSelectedLocationId(id);
+    setActiveLocationId(id);
     await refreshOverview();
   }
 
@@ -489,7 +565,7 @@ export function DashboardClient() {
 
     await refreshOverview();
     await refreshTleRows();
-    setSelectedSatelliteId(noradId);
+    setActiveNoradId(noradId);
   }
 
   async function handleFavoriteRemove(noradId: number) {
@@ -537,12 +613,32 @@ export function DashboardClient() {
               </span>
             </div>
           </div>
+          <div className="mb-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (selectedSatellite) globeRef.current?.focusOnSatellite(selectedSatellite.norad_id);
+              }}
+              disabled={!selectedSatellite}
+              className="rounded-full border border-rose-400/40 bg-rose-500/20 px-3 py-1.5 text-xs font-medium text-rose-100 disabled:opacity-40"
+            >
+              Focus camera
+            </button>
+            <button
+              type="button"
+              onClick={() => globeRef.current?.resetView()}
+              className="rounded-full border border-white/20 px-3 py-1.5 text-xs text-slate-200"
+            >
+              Reset view
+            </button>
+          </div>
           <GlobeScene
+            ref={globeRef}
             points={[...backgroundPoints, ...favoritePoints]}
             tracks={orbitTracks}
             livePath={livePath}
-            focus={focusPoint}
             observer={observerPoint}
+            onPointClick={onGlobePointClick}
           />
         </div>
 
@@ -552,15 +648,21 @@ export function DashboardClient() {
             <div className="mt-4 grid grid-cols-3 gap-3">
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Worker SGP4</p>
-                <p className="mt-2 text-3xl font-semibold text-white">{workerCounts.sgp4 ?? '—'}</p>
+                <p className="mt-2 text-3xl font-semibold text-white">
+                  <AnimatedNumber value={workerCounts.sgp4} />
+                </p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Worker N2YO</p>
-                <p className="mt-2 text-3xl font-semibold text-white">{workerCounts.n2yo ?? '—'}</p>
+                <p className="mt-2 text-3xl font-semibold text-white">
+                  <AnimatedNumber value={workerCounts.n2yo} />
+                </p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
                 <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Live Above</p>
-                <p className="mt-2 text-3xl font-semibold text-white">{liveAboveCount ?? '—'}</p>
+                <p className="mt-2 text-3xl font-semibold text-white">
+                  <AnimatedNumber value={liveAboveCount} />
+                </p>
               </div>
             </div>
             <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
@@ -619,7 +721,10 @@ export function DashboardClient() {
               {launches.map((launch) => (
                 <li key={launch.id} className="rounded-2xl border border-white/10 bg-black/20 p-3">
                   <p className="text-sm font-medium text-white">{launch.name}</p>
-                  <p className="mt-1 text-xs text-slate-400">
+                  <p className="mt-1 text-xs text-cyan-200/90">
+                    <LaunchCountdown netUtc={launch.net_utc} />
+                  </p>
+                  <p className="mt-0.5 text-xs text-slate-400">
                     {fmtDateTime(launch.net_utc)} · {launch.status ?? 'Unknown status'}
                   </p>
                 </li>
@@ -639,33 +744,48 @@ export function DashboardClient() {
             <span className="text-xs text-slate-500">{locations.length} saved</span>
           </div>
 
-          <form onSubmit={handleLocationSave} className="mt-4 grid gap-3 md:grid-cols-2">
-            <input
-              value={locationName}
-              onChange={(event) => setLocationName(event.target.value)}
-              placeholder="Location name"
-              className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
-            />
-            <div className="md:col-span-1" />
-            <input
-              value={locationLat}
-              onChange={(event) => setLocationLat(event.target.value)}
-              placeholder="Latitude"
-              className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
-            />
-            <input
-              value={locationLon}
-              onChange={(event) => setLocationLon(event.target.value)}
-              placeholder="Longitude"
-              className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
+          <div className="mt-4 space-y-4">
+            <CityLookupForm
+              onPicked={(r) => void handleGeocodePicked(r)}
+              onStatus={setStatusMessage}
             />
             <button
-              type="submit"
-              className="md:col-span-2 rounded-full bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950"
+              type="button"
+              onClick={() => setShowManualCoords((v) => !v)}
+              className="text-xs text-cyan-300/80 underline-offset-2 hover:underline"
             >
-              Save location
+              {showManualCoords ? 'Hide' : 'Add'} manual coordinates
             </button>
-          </form>
+            {showManualCoords ? (
+              <form onSubmit={handleLocationSave} className="grid gap-3 md:grid-cols-2">
+                <input
+                  value={locationName}
+                  onChange={(event) => setLocationName(event.target.value)}
+                  placeholder="Location name"
+                  className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
+                />
+                <div className="md:col-span-1" />
+                <input
+                  value={locationLat}
+                  onChange={(event) => setLocationLat(event.target.value)}
+                  placeholder="Latitude"
+                  className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
+                />
+                <input
+                  value={locationLon}
+                  onChange={(event) => setLocationLon(event.target.value)}
+                  placeholder="Longitude"
+                  className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/50"
+                />
+                <button
+                  type="submit"
+                  className="md:col-span-2 rounded-full bg-cyan-300 px-4 py-3 text-sm font-medium text-slate-950"
+                >
+                  Save location
+                </button>
+              </form>
+            ) : null}
+          </div>
 
           <div className="mt-4 space-y-3">
             {locations.length ? (
@@ -767,7 +887,7 @@ export function DashboardClient() {
                     }`}
                   >
                     <div className="flex items-start justify-between gap-4">
-                      <button type="button" onClick={() => setSelectedSatelliteId(satellite.noradId)} className="text-left">
+                      <button type="button" onClick={() => setActiveNoradId(satellite.noradId)} className="text-left">
                         <p className="text-sm font-medium text-white">{satellite.name}</p>
                         <p className="mt-1 text-xs text-slate-400">
                           {fmtCoord(satellite.lat, 'N', 'S')} · {fmtCoord(satellite.lon, 'E', 'W')}
