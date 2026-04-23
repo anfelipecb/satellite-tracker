@@ -7,16 +7,18 @@ const cesiumSource = path.join(__dirname, 'node_modules/cesium/Build/Cesium');
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ['cesium', 'resium', '@satellite-tracker/shared'],
+  transpilePackages: ['@satellite-tracker/shared'],
   webpack: (config, { webpack, isServer }) => {
     if (isServer) return config;
 
     config.plugins.push(
       new CopyWebpackPlugin({
         patterns: [
+          { from: path.join(cesiumSource, 'Cesium.js'), to: path.join(__dirname, 'public/cesium/Cesium.js') },
           { from: path.join(cesiumSource, 'Workers'), to: path.join(__dirname, 'public/cesium/Workers') },
           { from: path.join(cesiumSource, 'Assets'), to: path.join(__dirname, 'public/cesium/Assets') },
           { from: path.join(cesiumSource, 'ThirdParty'), to: path.join(__dirname, 'public/cesium/ThirdParty') },
+          { from: path.join(cesiumSource, 'Widgets'), to: path.join(__dirname, 'public/cesium/Widgets') },
         ],
       }),
       new webpack.DefinePlugin({
