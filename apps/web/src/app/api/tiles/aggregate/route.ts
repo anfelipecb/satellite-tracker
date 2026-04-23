@@ -18,53 +18,70 @@ import { getSupabaseAnonKeyForServer } from '@/lib/supabase/publicKey';
  * match what PostgREST expects (`PGRST301`, "No suitable key or wrong key type").
  */
 export async function GET(request: NextRequest) {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const mission = request.nextUrl.searchParams.get('mission')?.trim() ?? 'MOD09GA';
-  const hours = Math.min(720, Math.max(1, Number(request.nextUrl.searchParams.get('hours') ?? 24) || 24));
-  if (mission.length < 2 || mission.length > 64) {
-    return NextResponse.json({ error: 'Invalid mission' }, { status: 400 });
-  }
-
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  if (!url) {
-    return NextResponse.json({ error: 'Missing NEXT_PUBLIC_SUPABASE_URL' }, { status: 500 });
-  }
-
-  let key: string;
   try {
-    key = getSupabaseAnonKeyForServer();
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const mission = request.nextUrl.searchParams.get('mission')?.trim() ?? 'MOD09GA';
+    const hours = Math.min(720, Math.max(1, Number(request.nextUrl.searchParams.get('hours') ?? 24) || 24));
+    if (mission.length < 2 || mission.length > 64) {
+      return NextResponse.json({ error: 'Invalid mission' }, { status: 400 });
+    }
+
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    if (!url) {
+      return NextResponse.json({ error: 'Missing NEXT_PUBLIC_SUPABASE_URL' }, { status: 500 });
+    }
+
+    let key: string;
+    try {
+      key = getSupabaseAnonKeyForServer();
+    } catch (e) {
+      return NextResponse.json(
+        { error: e instanceof Error ? e.message : 'Supabase key configuration' },
+        { status: 500 },
+      );
+    }
+
+    const supabase = createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const since = new Date(Date.now() - hours * 3_600_000).toISOString();
+
+    const { data, error } = await supabase.rpc('granule_tile_counts', {
+      p_mission: mission,
+      p_since: since,
+      p_limit: 5000,
+    });
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    // RPC returns jsonb; PostgREST usually returns a parsed array, sometimes a string.
+    let raw: { h3_index: string; count: number | bigint }[];
+    if (data == null) {
+      raw = [];
+    } else if (typeof data === 'string') {
+      raw = JSON.parse(data) as { h3_index: string; count: number | bigint }[];
+    } else {
+      raw = data as { h3_index: string; count: number | bigint }[];
+    }
+    const cells = raw.map((c) => ({
+      h3_index: c.h3_index,
+      count: typeof c.count === 'bigint' ? Number(c.count) : Number(c.count),
+    }));
+
+    return NextResponse.json(
+      { cells },
+      { headers: { 'Cache-Control': 's-maxage=30, stale-while-revalidate=60' } },
+    );
   } catch (e) {
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : 'Supabase key configuration' },
+      { error: e instanceof Error ? e.message : 'Internal error' },
       { status: 500 },
     );
   }
-
-  const supabase = createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-  const since = new Date(Date.now() - hours * 3_600_000).toISOString();
-
-  const { data, error } = await supabase.rpc('granule_tile_counts', {
-    p_mission: mission,
-    p_since: since,
-    p_limit: 5000,
-  });
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  // RPC returns a single jsonb blob (array) to bypass PostgREST's 1 000-row
-  // pagination cap. Cast defensively in case it comes back as null.
-  const cells = (data as { h3_index: string; count: number }[] | null) ?? [];
-
-  return NextResponse.json(
-    { cells },
-    { headers: { 'Cache-Control': 's-maxage=30, stale-while-revalidate=60' } },
-  );
 }
