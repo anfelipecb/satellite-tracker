@@ -1,6 +1,7 @@
 import { auth } from '@clerk/nextjs/server';
+import { createClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
-import { createSupabaseServerClient } from '@/lib/supabase/server';
+import { getSupabasePublicKey } from '@/lib/supabase/publicKey';
 
 /**
  * H3 index → observation count in time window (from granules the worker has tiled).
@@ -9,6 +10,12 @@ import { createSupabaseServerClient } from '@/lib/supabase/server';
  * server-side in a single SQL query. The previous client-side fan-out was
  * hitting PostgREST's default 1 000-row limit per batch and silently capping
  * "Total observations" at 5 000 even when the DB held millions of tiles.
+ *
+ * We still require a signed-in Clerk user, but we call PostgREST with the
+ * **anon** key only (no Clerk→Supabase JWT). The RPC is `security definer`
+ * and returns global mission stats; passing a user JWT is unnecessary and
+ * breaks in production when Clerk third-party auth / JWT templates do not
+ * match what PostgREST expects (`PGRST301`, "No suitable key or wrong key type").
  */
 export async function GET(request: NextRequest) {
   const { userId } = await auth();
@@ -22,7 +29,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid mission' }, { status: 400 });
   }
 
-  const supabase = await createSupabaseServerClient();
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!url) {
+    return NextResponse.json({ error: 'Missing NEXT_PUBLIC_SUPABASE_URL' }, { status: 500 });
+  }
+
+  const key = getSupabasePublicKey();
+  const supabase = createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
   const since = new Date(Date.now() - hours * 3_600_000).toISOString();
 
   const { data, error } = await supabase.rpc('granule_tile_counts', {
