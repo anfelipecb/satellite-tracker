@@ -79,7 +79,7 @@ function ensureCesium() {
   if (window.Cesium) return Promise.resolve(window.Cesium);
   if (cesiumReadyPromise) return cesiumReadyPromise;
 
-  cesiumReadyPromise = new Promise((resolve, reject) => {
+  cesiumReadyPromise = new Promise(async (resolve, reject) => {
     const cssId = 'cesium-widgets-css';
     if (!document.getElementById(cssId)) {
       const link = document.createElement('link');
@@ -89,28 +89,23 @@ function ensureCesium() {
       document.head.appendChild(link);
     }
 
-    const existing = document.querySelector<HTMLScriptElement>('script[data-cesium-script="true"]');
-    if (existing) {
-      existing.addEventListener('load', () => {
-        if (window.Cesium) resolve(window.Cesium);
-      });
-      existing.addEventListener('error', () => reject(new Error('Failed to load Cesium script.')));
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = '/cesium/Cesium.js';
-    script.async = true;
-    script.dataset.cesiumScript = 'true';
-    script.onload = () => {
-      if (!window.Cesium) {
-        reject(new Error('Cesium loaded without a global runtime.'));
+    try {
+      const loadCesiumModule = new Function(
+        'return import("/cesium-runtime.js")'
+      ) as () => Promise<{ default?: CesiumGlobal }>;
+      const cesiumModule = await loadCesiumModule();
+      const Cesium = (cesiumModule.default ?? window.Cesium) as CesiumGlobal | undefined;
+      if (!Cesium) {
+        reject(new Error('Cesium module loaded without a runtime export.'));
         return;
       }
-      resolve(window.Cesium);
-    };
-    script.onerror = () => reject(new Error('Failed to load Cesium browser bundle.'));
-    document.head.appendChild(script);
+      window.Cesium = Cesium;
+      resolve(Cesium);
+    } catch (error) {
+      reject(
+        error instanceof Error ? error : new Error('Failed to load the Cesium runtime module.')
+      );
+    }
   });
 
   return cesiumReadyPromise;

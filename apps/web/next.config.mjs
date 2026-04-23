@@ -15,6 +15,7 @@ const nextConfig = {
       new CopyWebpackPlugin({
         patterns: [
           { from: path.join(cesiumSource, 'Cesium.js'), to: path.join(__dirname, 'public/cesium/Cesium.js') },
+          { from: path.join(cesiumSource, 'index.js'), to: path.join(__dirname, 'public/cesium/index.js') },
           { from: path.join(cesiumSource, 'Workers'), to: path.join(__dirname, 'public/cesium/Workers') },
           { from: path.join(cesiumSource, 'Assets'), to: path.join(__dirname, 'public/cesium/Assets') },
           { from: path.join(cesiumSource, 'ThirdParty'), to: path.join(__dirname, 'public/cesium/ThirdParty') },
